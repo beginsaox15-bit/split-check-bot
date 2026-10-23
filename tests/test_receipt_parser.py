@@ -6,6 +6,58 @@ from bot.services.receipt_parser import parse_receipt_lines
 
 
 class ReceiptParserTests(unittest.TestCase):
+    def test_explicit_ruble_markers_override_dollar_noise(self) -> None:
+        for marker in ("₽", "руб", "руб.", "RUB", "rub"):
+            for noise_first in (True, False):
+                with self.subTest(marker=marker, noise_first=noise_first):
+                    rows = [f"Пицца 650 {marker}", f"ИТОГО 650 {marker}"]
+                    # Служебная строка не должна переключать валюту всего чека.
+                    noise = ["КАРТА 650 $"]
+                    result = parse_receipt_lines(noise + rows if noise_first else rows + noise)
+                    self.assertEqual(result.currency, "RUB")
+                    self.assertEqual(result.items_total, Decimal("650"))
+                    self.assertEqual(result.receipt_total, "650")
+
+    def test_russian_fiscal_markers_take_priority(self) -> None:
+        for marker in ("ИНН 1234567890", "ККТ 123456", "ККМ 123456", "ФН 1234567890123456",
+                       "ФД 1234", "ФПД 1234567890", "ОФД", "ФФД 1.2"):
+            with self.subTest(marker=marker):
+                result = parse_receipt_lines([marker, "Пицца 650", "ИТОГО 650", "КАРТА 650 $"])
+                self.assertEqual(result.currency, "RUB")
+
+    def test_russian_receipt_without_currency_uses_rubles(self) -> None:
+        result = parse_receipt_lines([
+            "Коктейль 650", "Бургер 850", "Чай 330", "Салат 570", "Пицца 1250",
+            "Паста 850", "ИТОГО 4500",
+        ])
+        self.assertEqual(result.currency, "RUB")
+        self.assertEqual(result.items_total, Decimal("4500"))
+        self.assertEqual(result.receipt_total, "4500")
+        self.assertFalse(result.totals_mismatch)
+
+    def test_dollars_require_explicit_currency_evidence(self) -> None:
+        for marker in ("$", "USD"):
+            with self.subTest(marker=marker):
+                result = parse_receipt_lines([f"Coffee 12.50 {marker}", f"TOTAL 12.50 {marker}"])
+                self.assertEqual(result.currency, "USD")
+                self.assertEqual(result.items_total, Decimal("12.50"))
+                self.assertFalse(result.totals_mismatch)
+
+    def test_euros_remain_euros(self) -> None:
+        for marker in ("EUR", "€"):
+            with self.subTest(marker=marker):
+                result = parse_receipt_lines([f"Coffee 12.50 {marker}", f"TOTAL 12.50 {marker}"])
+                self.assertEqual(result.currency, "EUR")
+                self.assertEqual(result.items_total, Decimal("12.50"))
+                self.assertFalse(result.totals_mismatch)
+
+    def test_qr_urls_and_stray_dollar_are_not_currency_evidence(self) -> None:
+        for noise in ("QR ABC$123", "https://example.test/USD", "www.example.test/$123", "$", "Код A$Z"):
+            with self.subTest(noise=noise):
+                result = parse_receipt_lines(["Пицца 650", "ИТОГО 650", noise])
+                self.assertEqual(result.currency, "RUB")
+                self.assertEqual(result.items_total, Decimal("650"))
+
     def test_russian_items_quantity_and_fiscal_lines(self) -> None:
         result = parse_receipt_lines([
             "ООО Ресторан", "ИНН 123456789012", "КАССА № 1", "ЧЕК № 1234",

@@ -29,6 +29,25 @@ SERVICE = re.compile(
 )
 DATE_TIME = re.compile(r"\b(?:[0-3]?\d[./-][01]?\d[./-](?:20)?\d{2}|20\d{2}-\d{2}-\d{2}|\d{1,2}:\d{2}(?::\d{2})?)\b")
 CURRENCY_SUFFIX = re.compile(r"\s*(?:₽|руб\.?|р\.|RUB|USD|EUR|€|\$)\s*$", re.I)
+RUBLE_MARKER = re.compile(r"₽|\b(?:руб|RUB)\b", re.I)
+RUSSIAN_FISCAL = re.compile(r"\b(?:ИНН|ККТ|ККМ|ФН|ФД|ФПД|ОФД|ФФД)\b", re.I)
+DOLLAR_MARKER = re.compile(r"\bUSD\b|\$\s*\d|\d\s*\$", re.I)
+EURO_MARKER = re.compile(r"\bEUR\b|€\s*\d|\d\s*€", re.I)
+
+
+def detect_currency(lines: list[str]) -> str:
+    normalized = [normalize(line) for line in lines]
+    # Признаки рублёвого чека важнее случайного $ в OCR/фискальных данных;
+    # результат не должен зависеть от порядка строк.
+    if any(RUBLE_MARKER.search(line) or RUSSIAN_FISCAL.search(line) for line in normalized):
+        return "RUB"
+    evidence = [line for line in normalized
+                if not re.search(r"^QR\b|://|www\.", line, re.I)]
+    for currency, marker in (("USD", DOLLAR_MARKER), ("EUR", EURO_MARKER)):
+        if any(marker.search(line) for line in evidence):
+            return currency
+    # Существующий безопасный fallback для русскоязычных рублёвых чеков.
+    return "RUB"
 
 
 def normalize(text: str) -> str:
@@ -65,15 +84,11 @@ def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
     receipt_total = None
     pending_name = None
     awaiting_total = False
-    currency = "RUB"  # Основной сценарий бота — рублёвые чеки.
+    currency = detect_currency(lines)
     for raw in lines:
         line = normalize(raw)
         if not line:
             continue
-        if re.search(r"\bUSD\b|\$", line):
-            currency = "USD"
-        elif re.search(r"\bEUR\b|€", line):
-            currency = "EUR"
         line = CURRENCY_SUFFIX.sub("", line).strip()
         if TOTAL.match(line):
             tail = TAIL_AMOUNT.search(line)

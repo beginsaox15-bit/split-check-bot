@@ -76,8 +76,9 @@ class TesseractSmokeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await storage.close()
         self.assertEqual([item.name for item in result.items], ["Пицца", "Coffee"])
+        self.assertEqual(result.currency, "RUB")
         self.assertEqual(result.items_total, Decimal("2000.00"))
         self.assertFalse(result.totals_mismatch)
         self.assertIn("ИТОГО", result.raw_text)
-        self.assertIn("Итого по найденным позициям: 2000", replies[-1])
+        self.assertIn("Итого по найденным позициям: 2000 ₽", replies[-1])
         self.assertIn("Проверьте позиции", replies[-1])
