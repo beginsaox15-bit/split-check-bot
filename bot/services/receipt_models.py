@@ -1,4 +1,4 @@
-"""Общие модели и ошибки локального и опционального облачного OCR."""
+"""Модели и ошибки локального OCR. Деньги сериализуются строками, считаются Decimal."""
 
 from decimal import Decimal, localcontext
 from typing import Annotated
@@ -41,6 +41,7 @@ class RecognizedReceipt(BaseModel):
     items: list[ReceiptItem] = Field(max_length=200)
     receipt_total: Money | None
     currency: Annotated[str, Field(pattern=r"^[A-Z]{3}$")] | None
+    raw_text: str = ""
 
     @property
     def items_total(self) -> Decimal:
@@ -55,11 +56,7 @@ class RecognizedReceipt(BaseModel):
 
 
 class RecognitionError(Exception):
-    """Безопасная для обработки в Telegram ошибка без содержимого API-запроса."""
-
-
-class MissingAPIKey(RecognitionError):
-    pass
+    """Ошибка распознавания без содержимого фотографии в сообщении."""
 
 
 class UnreadableReceipt(RecognitionError):
@@ -68,5 +65,21 @@ class UnreadableReceipt(RecognitionError):
 
 class RecognitionUnavailable(RecognitionError):
     pass
+
+
+class TesseractNotInstalled(RecognitionUnavailable):
+    pass
+
+
+class TesseractLanguagesUnavailable(RecognitionUnavailable):
+    pass
+
+
+class UnparsedReceipt(UnreadableReceipt):
+    """Текст прочитан, но parser не смог выделить надёжные позиции."""
+
+    def __init__(self, raw_text: str):
+        super().__init__("No reliable purchase lines found")
+        self.raw_text = raw_text
 
 

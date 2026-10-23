@@ -10,10 +10,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.receipt import money, parse_price, parse_quantity, receipt_lines
-from bot.services.receipt_recognition import (
-    MissingAPIKey, RecognitionUnavailable, RecognizedReceipt, UnreadableReceipt,
-    recognize_receipt,
+from bot.services.receipt_models import (
+    RecognizedReceipt, RecognitionUnavailable, TesseractLanguagesUnavailable,
+    TesseractNotInstalled, UnparsedReceipt, UnreadableReceipt,
 )
+from bot.services.receipt_recognition import recognize_receipt
 
 
 router = Router()
@@ -64,6 +65,14 @@ RECOGNITION_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="✅ Всё верно", callback_data="confirm_recognition")],
     [InlineKeyboardButton(text="✏️ Исправить", callback_data="edit_recognition")],
     [InlineKeyboardButton(text="🔄 Распознать заново", callback_data="repeat_recognition")],
+    [InlineKeyboardButton(text="📄 Показать распознанный текст", callback_data="show_recognized_text")],
+    [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_receipt")],
+])
+
+RAW_TEXT_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="manual_entry")],
+    [InlineKeyboardButton(text="🔄 Распознать заново", callback_data="repeat_recognition")],
+    [InlineKeyboardButton(text="📄 Показать распознанный текст", callback_data="show_recognized_text")],
     [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_receipt")],
 ])
 
@@ -113,11 +122,22 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
         with BytesIO() as image:
             await message.bot.download(photo["file_id"], destination=image, timeout=30)
             result = await recognize_receipt(image.getvalue())
-    except MissingAPIKey:
-        logger.warning("Receipt recognition is not configured: OPENAI_API_KEY missing")
+    except (TesseractNotInstalled, TesseractLanguagesUnavailable) as error:
+        logger.warning("Local OCR setup missing: %s", type(error).__name__)
         await message.answer(
-            "Распознавание пока не настроено. Пока можете ввести позиции вручную.",
+            "Локальное распознавание пока не настроено: недоступен Tesseract или языки русского и английского. "
+            "Пока можете ввести позиции вручную.",
             reply_markup=RECOGNITION_RETRY_MENU,
+        )
+        return
+    except UnparsedReceipt as error:
+        await state.update_data(raw_text=error.raw_text)
+        await answer_in_parts(
+            message,
+            "Текст распознан, но выделить позиции автоматически не удалось. "
+            "Введите позиции вручную или попробуйте распознать заново.\n\n"
+            "Распознанный текст:\n" + error.raw_text,
+            RAW_TEXT_MENU,
         )
         return
     except UnreadableReceipt:
@@ -280,6 +300,20 @@ async def repeat_recognition(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
     if isinstance(callback.message, Message):
         await recognize_last_photo(callback.message, state)
+
+
+@router.callback_query(F.data == "show_recognized_text")
+async def show_recognized_text(callback: CallbackQuery, state: FSMContext) -> None:
+    current_state = await state.get_state()
+    data = await state.get_data()
+    raw_text = data.get("recognition", {}).get("raw_text") or data.get("raw_text")
+    if current_state not in (ReceiptInput.photo.state, ReceiptInput.review.state) or not raw_text:
+        await callback.answer("Нет распознанного текста. Отправьте новую фотографию.")
+        return
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        menu = RECOGNITION_MENU if current_state == ReceiptInput.review.state else RAW_TEXT_MENU
+        await answer_in_parts(callback.message, "Распознанный текст:\n" + raw_text, menu)
 
 
 @router.callback_query(F.data == "retry_photo")

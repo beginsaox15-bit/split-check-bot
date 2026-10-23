@@ -8,8 +8,9 @@ from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import Update
 
 from bot.handlers import ManualReceipt, ReceiptInput, router
-from bot.services.receipt_recognition import (
-    MissingAPIKey, RecognizedReceipt, RecognitionUnavailable, UnreadableReceipt,
+from bot.services.receipt_models import (
+    RecognizedReceipt, RecognitionUnavailable, TesseractLanguagesUnavailable,
+    TesseractNotInstalled, UnparsedReceipt, UnreadableReceipt,
 )
 
 
@@ -36,6 +37,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 {"name": "Коктейль", "quantity": "1", "unit_price": "650.00", "total_price": "650.00"},
             ],
             "receipt_total": "2350.00", "currency": "RUB",
+            "raw_text": "Бургер 2 × 850.00 = 1700.00\nКоктейль 650.00\nИТОГО 2350.00",
         })
         self.download = self.enterContext(patch.object(Bot, "download", new_callable=AsyncMock))
 
@@ -291,6 +293,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             [("✅ Всё верно", "confirm_recognition")],
             [("✏️ Исправить", "edit_recognition")],
             [("🔄 Распознать заново", "repeat_recognition")],
+            [("📄 Показать распознанный текст", "show_recognized_text")],
             [("❌ Отменить", "cancel_receipt")],
         ])
         self.assertEqual(await self.context().get_state(), ReceiptInput.review.state)
@@ -400,7 +403,8 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_recognition_errors_offer_retry_manual_and_cancel(self) -> None:
         for error, expected in (
             (UnreadableReceipt(), "Не удалось надёжно распознать чек 😕"),
-            (MissingAPIKey(), "Распознавание пока не настроено."),
+            (TesseractNotInstalled(), "Локальное распознавание пока не настроено"),
+            (TesseractLanguagesUnavailable(), "Локальное распознавание пока не настроено"),
             (RecognitionUnavailable("sensitive-api-message"), "Сервис распознавания временно недоступен."),
         ):
             with self.subTest(error=type(error).__name__):
@@ -455,3 +459,63 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("Валюта не определена", methods[-1].text)
                 else:
                     self.assertIn("2350 USD", methods[-1].text)
+
+    async def test_show_raw_text_keeps_review_and_confirmation_available(self) -> None:
+        await self.dispatch(self.callback("split_check"))
+        await self.dispatch(self.photo())
+        before = await self.context().get_data()
+        methods = await self.dispatch(self.callback("show_recognized_text"))
+        self.assertIn(self.recognize.return_value.raw_text, methods[-1].text)
+        buttons = [b.text for row in methods[-1].reply_markup.inline_keyboard for b in row]
+        self.assertEqual(buttons, ["✅ Всё верно", "✏️ Исправить", "🔄 Распознать заново",
+                                   "📄 Показать распознанный текст", "❌ Отменить"])
+        self.assertEqual(await self.context().get_data(), before)
+        self.assertEqual(await self.context().get_state(), ReceiptInput.review.state)
+        await self.dispatch(self.callback("confirm_recognition"))
+        self.assertNotIn("raw_text", await self.context().get_data())
+        methods = await self.dispatch(self.callback("show_recognized_text"))
+        self.assertEqual(len(methods), 1)
+
+    async def test_parser_failure_shows_text_and_allows_manual_input(self) -> None:
+        raw_text = "ЧЕК\nнеобычная вёрстка\nИТОГО 100"
+        self.recognize.side_effect = UnparsedReceipt(raw_text)
+        await self.dispatch(self.callback("split_check"))
+        methods = await self.dispatch(self.photo())
+        self.assertIn(raw_text, methods[-1].text)
+        self.assertIn("Введите позиции вручную", methods[-1].text)
+        self.assertEqual(await self.context().get_state(), ReceiptInput.photo.state)
+        data = await self.context().get_data()
+        self.assertEqual(data["raw_text"], raw_text)
+        self.assertNotIn("recognition", data)
+        methods = await self.dispatch(self.callback("confirm_recognition"))
+        self.assertEqual(len(methods), 1)
+        methods = await self.dispatch(self.callback("show_recognized_text"))
+        self.assertIn(raw_text, methods[-1].text)
+        await self.dispatch(self.callback("manual_entry"))
+        self.assertEqual(await self.context().get_data(), {"items": []})
+        methods = await self.enter_item("Чай", "100", "1")
+        self.assertIn("Итого: 100 ₽", methods[-1].text)
+
+    async def test_long_unparsed_text_is_sent_in_parts_and_can_be_retried(self) -> None:
+        raw_text = "необычная вёрстка\n" * 500
+        self.recognize.side_effect = UnparsedReceipt(raw_text)
+        await self.dispatch(self.callback("split_check"))
+        methods = await self.dispatch(self.photo())
+        messages = [m for m in methods if isinstance(m, SendMessage)]
+        self.assertGreater(len(messages), 2)
+        self.assertTrue(all(len(m.text) <= 2000 for m in messages))
+        self.assertIsNotNone(messages[-1].reply_markup)
+        self.recognize.side_effect = None
+        await self.dispatch(self.callback("repeat_recognition"))
+        data = await self.context().get_data()
+        self.assertNotIn("raw_text", data)
+        self.assertIn("recognition", data)
+
+    async def test_raw_text_is_unavailable_to_other_users_and_after_cancel(self) -> None:
+        await self.dispatch(self.callback("split_check"))
+        await self.dispatch(self.photo())
+        methods = await self.dispatch(self.callback("show_recognized_text", user_id=43))
+        self.assertEqual(len(methods), 1)
+        await self.dispatch(self.callback("cancel_receipt"))
+        methods = await self.dispatch(self.callback("show_recognized_text"))
+        self.assertEqual(len(methods), 1)
