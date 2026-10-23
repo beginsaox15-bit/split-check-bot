@@ -3,3 +3,5 @@ python-dotenv>=1.0,<2.0
 pydantic>=2.7,<3.0
 pytesseract>=0.3.13,<0.4
 Pillow>=11,<13
+numpy>=1.26,<3
+opencv-python-headless>=4.10,<5

@@ -83,3 +83,11 @@ class UnparsedReceipt(UnreadableReceipt):
         self.raw_text = raw_text
 
 
+class LowQualityReceipt(UnreadableReceipt):
+    """Слишком мало уверенно распознанного текста; parser не запускался."""
+
+    def __init__(self, raw_text: str):
+        super().__init__("Insufficient reliable OCR text")
+        self.raw_text = raw_text
+
+

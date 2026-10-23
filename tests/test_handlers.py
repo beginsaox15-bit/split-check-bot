@@ -15,6 +15,21 @@ from bot.services.receipt_models import (
 
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_low_quality_ocr_keeps_raw_text_button_without_creating_items(self) -> None:
+        from bot.services.receipt_models import LowQualityReceipt
+        await self.dispatch(self.callback("split_check"))
+        self.recognize.side_effect = LowQualityReceipt("неуверенный текст 123")
+        methods = await self.dispatch(self.photo())
+        self.assertEqual(methods[-1].text, "Чек удалось прочитать не полностью 😕\n"
+                         "Попробуйте сфотографировать его ближе, ровнее и без теней.")
+        callbacks = [button.callback_data for row in methods[-1].reply_markup.inline_keyboard for button in row]
+        self.assertIn("show_recognized_text", callbacks)
+        data = await self.context().get_data()
+        self.assertNotIn("recognition", data)
+        self.assertEqual(data["raw_text"], "неуверенный текст 123")
+        methods = await self.dispatch(self.callback("show_recognized_text"))
+        self.assertIn("неуверенный текст 123", methods[-1].text)
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.dispatcher = Dispatcher()
@@ -402,7 +417,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_recognition_errors_offer_retry_manual_and_cancel(self) -> None:
         for error, expected in (
-            (UnreadableReceipt(), "Не удалось надёжно распознать чек 😕"),
+            (UnreadableReceipt(), "Чек удалось прочитать не полностью 😕"),
             (TesseractNotInstalled(), "Локальное распознавание пока не настроено"),
             (TesseractLanguagesUnavailable(), "Локальное распознавание пока не настроено"),
             (RecognitionUnavailable("sensitive-api-message"), "Сервис распознавания временно недоступен."),

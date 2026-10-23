@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from bot.receipt import money, parse_price, parse_quantity, receipt_lines
 from bot.services.receipt_models import (
-    RecognizedReceipt, TesseractLanguagesUnavailable,
+    LowQualityReceipt, RecognizedReceipt, TesseractLanguagesUnavailable,
     TesseractNotInstalled, UnparsedReceipt, UnreadableReceipt,
 )
 from bot.services.receipt_recognition import recognize_receipt
@@ -56,8 +56,8 @@ RECOGNITION_RETRY_MENU = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 UNREADABLE_TEXT = (
-    "Не удалось надёжно распознать чек 😕\n"
-    "Попробуйте сфотографировать его ровно, целиком и при хорошем освещении."
+    "Чек удалось прочитать не полностью 😕\n"
+    "Попробуйте сфотографировать его ближе, ровнее и без теней."
 )
 
 RECOGNITION_MENU = InlineKeyboardMarkup(inline_keyboard=[
@@ -128,6 +128,10 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
             "Пока можете ввести позиции вручную.",
             reply_markup=RECOGNITION_RETRY_MENU,
         )
+        return
+    except LowQualityReceipt as error:
+        await state.update_data(raw_text=error.raw_text)
+        await message.answer(UNREADABLE_TEXT, reply_markup=RAW_TEXT_MENU)
         return
     except UnparsedReceipt as error:
         await state.update_data(raw_text=error.raw_text)
