@@ -8,6 +8,9 @@ from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import Update
 
 from bot.handlers import ManualReceipt, ReceiptInput, router
+from bot.services.receipt_recognition import (
+    MissingAPIKey, RecognizedReceipt, RecognitionUnavailable, UnreadableReceipt,
+)
 
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -25,6 +28,22 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         await self.context().clear()
         await self.context(43).clear()
+        self.recognize = self.enterContext(patch("bot.handlers.recognize_receipt", new_callable=AsyncMock))
+        self.recognize.return_value = RecognizedReceipt.model_validate({
+            "readable": True,
+            "items": [
+                {"name": "Бургер", "quantity": "2", "unit_price": "850.00", "total_price": "1700.00"},
+                {"name": "Коктейль", "quantity": "1", "unit_price": "650.00", "total_price": "650.00"},
+            ],
+            "receipt_total": "2350.00", "currency": "RUB",
+        })
+        self.download = self.enterContext(patch.object(Bot, "download", new_callable=AsyncMock))
+
+        async def download(file_id, *, destination, timeout):
+            destination.write(b"test-image-bytes")
+            return destination
+
+        self.download.side_effect = download
 
     def message(self, text: str | None, user_id: int = 42) -> dict:
         message = {
@@ -260,23 +279,30 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_receipt_photo_in_split_scenario(self) -> None:
         await self.dispatch(self.callback("split_check"))
         methods = await self.dispatch(self.photo())
-        # Только ответ пользователю: getFile и скачивание не вызываются.
-        self.assertEqual(len(methods), 1)
+        self.assertEqual(len(methods), 2)
         self.assertIsInstance(methods[0], SendMessage)
         self.assertEqual(methods[0].chat_id, 42)
-        self.assertEqual(methods[0].text,
-                         "Фото чека получено ✅\n\n"
-                         "На следующем этапе я смогу распознать позиции автоматически.\n\n"
-                         "Пока можете ввести позиции вручную.")
-        self.assert_buttons(methods[0], [
-            [("✍️ Ввести вручную", "manual_entry")],
+        self.assertEqual(methods[0].text, "Чек получен 🧾\nРаспознаю позиции…")
+        self.assertEqual(methods[1].text,
+                         "Я распознал чек 🧾\n\n1. Бургер × 2 — 1700 ₽\n"
+                         "2. Коктейль × 1 — 650 ₽\n\n"
+                         "Итого по позициям: 2350 ₽\nИтого в чеке: 2350 ₽")
+        self.assert_buttons(methods[1], [
+            [("✅ Всё верно", "confirm_recognition")],
+            [("✏️ Исправить", "edit_recognition")],
+            [("🔄 Распознать заново", "repeat_recognition")],
             [("❌ Отменить", "cancel_receipt")],
         ])
-        self.assertEqual(await self.context().get_state(), ReceiptInput.photo.state)
-        self.assertEqual(await self.context().get_data(), {"receipt_photo": {
+        self.assertEqual(await self.context().get_state(), ReceiptInput.review.state)
+        data = await self.context().get_data()
+        self.assertEqual(data["receipt_photo"], {
             "file_id": "large-photo", "file_unique_id": "large-unique",
             "width": 960, "height": 1280, "file_size": 150000,
-        }})
+        })
+        self.assertNotIn("items", data)
+        self.recognize.assert_awaited_once_with(b"test-image-bytes")
+        self.assertEqual(self.download.await_args.args, ("large-photo",))
+        self.assertTrue(self.download.await_args.kwargs["destination"].closed)
         self.assertEqual(await self.context(43).get_data(), {})
 
     async def test_photo_outside_scenario_offers_to_start(self) -> None:
@@ -293,9 +319,10 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         # Кнопка из подсказки действительно запускает приём фото.
         await self.dispatch(self.callback("split_check"))
         methods = await self.dispatch(self.photo())
-        self.assertIn("Фото чека получено ✅", methods[-1].text)
+        self.assertIn("Я распознал чек 🧾", methods[-1].text)
 
     async def test_photo_to_manual_entry_and_finish(self) -> None:
+        self.recognize.side_effect = UnreadableReceipt()
         await self.dispatch(self.callback("split_check"))
         await self.dispatch(self.photo())
         methods = await self.dispatch(self.callback("manual_entry"))
@@ -340,3 +367,91 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("нажмите «🧾 Разделить чек»", methods[-1].text)
         self.assertEqual(await self.context(43).get_data(), {})
         self.assertEqual(await self.context(42).get_state(), ReceiptInput.photo.state)
+
+    async def test_confirm_recognized_receipt_stores_items_and_drops_photo(self) -> None:
+        await self.dispatch(self.callback("split_check"))
+        await self.dispatch(self.photo())
+        self.assertNotIn("items", await self.context().get_data())
+        methods = await self.dispatch(self.callback("confirm_recognition"))
+        self.assertEqual(methods[-1].text, "Чек подтверждён ✅")
+        data = await self.context().get_data()
+        self.assertEqual(data["items"][0], {
+            "name": "Бургер", "quantity": "2", "unit_price": "850.00", "total_price": "1700.00",
+        })
+        self.assertEqual(data["receipt_total"], "2350.00")
+        self.assertEqual(data["currency"], "RUB")
+        self.assertNotIn("receipt_photo", data)
+        self.assertNotIn("recognition", data)
+        self.assertEqual(await self.context().get_state(), ReceiptInput.confirmed.state)
+        # Старое повторное подтверждение не дублирует позиции.
+        await self.dispatch(self.callback("confirm_recognition"))
+        self.assertEqual(await self.context().get_data(), data)
+        await self.dispatch(self.callback("cancel_receipt"))
+        self.assertEqual(await self.context().get_data(), {})
+
+    async def test_mismatched_recognition_total_warns_user(self) -> None:
+        self.recognize.return_value.receipt_total = "2400.00"
+        await self.dispatch(self.callback("split_check"))
+        methods = await self.dispatch(self.photo())
+        self.assertIn("Итого по позициям: 2350 ₽", methods[-1].text)
+        self.assertIn("Итого в чеке: 2400 ₽", methods[-1].text)
+        self.assertIn("⚠️ Сумма позиций не совпадает с итогом чека. Проверьте распознавание.", methods[-1].text)
+
+    async def test_recognition_errors_offer_retry_manual_and_cancel(self) -> None:
+        for error, expected in (
+            (UnreadableReceipt(), "Не удалось надёжно распознать чек 😕"),
+            (MissingAPIKey(), "Распознавание пока не настроено."),
+            (RecognitionUnavailable("sensitive-api-message"), "Сервис распознавания временно недоступен."),
+        ):
+            with self.subTest(error=type(error).__name__):
+                await self.context().clear()
+                self.recognize.side_effect = error
+                await self.dispatch(self.callback("split_check"))
+                methods = await self.dispatch(self.photo())
+                self.assertIn(expected, methods[-1].text)
+                self.assertNotIn("sensitive-api-message", methods[-1].text)
+                self.assert_buttons(methods[-1], [
+                    [("📷 Попробовать ещё раз", "retry_photo")],
+                    [("✍️ Ввести вручную", "manual_entry")],
+                    [("❌ Отменить", "cancel_receipt")],
+                ])
+                self.assertEqual(await self.context().get_state(), ReceiptInput.photo.state)
+                self.assertNotIn("items", await self.context().get_data())
+                self.assertNotIn("recognition", await self.context().get_data())
+                self.assertTrue(self.download.await_args.kwargs["destination"].closed)
+
+    async def test_repeat_downloads_last_photo_and_edit_is_placeholder(self) -> None:
+        await self.dispatch(self.callback("split_check"))
+        await self.dispatch(self.photo())
+        methods = await self.dispatch(self.callback("edit_recognition"))
+        self.assertEqual(methods[-1].text, "Редактирование распознанных позиций будет добавлено следующим этапом.")
+        await self.dispatch(self.callback("repeat_recognition"))
+        self.assertEqual(self.download.await_count, 2)
+        self.assertEqual(self.recognize.await_count, 2)
+        self.assertTrue(all(call.args == ("large-photo",) for call in self.download.await_args_list))
+        # После отмены старые кнопки не запускают запросы.
+        await self.dispatch(self.callback("cancel_receipt"))
+        await self.dispatch(self.callback("repeat_recognition"))
+        self.assertEqual(self.recognize.await_count, 2)
+
+    async def test_retry_asks_for_new_photo_and_clears_previous_result(self) -> None:
+        await self.dispatch(self.callback("split_check"))
+        await self.dispatch(self.photo())
+        methods = await self.dispatch(self.callback("retry_photo"))
+        self.assertEqual(methods[-1].text, "Отправьте фотографию чека ещё раз.")
+        self.assertEqual(await self.context().get_data(), {})
+        self.assertEqual(await self.context().get_state(), ReceiptInput.photo.state)
+
+    async def test_foreign_or_unknown_currency_is_not_assumed_to_be_rubles(self) -> None:
+        await self.dispatch(self.callback("split_check"))
+        for currency in ("USD", None):
+            with self.subTest(currency=currency):
+                self.recognize.return_value.currency = currency
+                self.recognize.return_value.receipt_total = None
+                methods = await self.dispatch(self.photo())
+                self.assertNotIn("₽", methods[-1].text)
+                self.assertIn("Итого в чеке: не определён", methods[-1].text)
+                if currency is None:
+                    self.assertIn("Валюта не определена", methods[-1].text)
+                else:
+                    self.assertIn("2350 USD", methods[-1].text)

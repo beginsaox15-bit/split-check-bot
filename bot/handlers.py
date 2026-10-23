@@ -1,13 +1,23 @@
+import logging
+from decimal import Decimal
+from io import BytesIO
+
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from bot.receipt import parse_price, parse_quantity, receipt_lines
+from bot.receipt import money, parse_price, parse_quantity, receipt_lines
+from bot.services.receipt_recognition import (
+    MissingAPIKey, RecognitionUnavailable, RecognizedReceipt, UnreadableReceipt,
+    recognize_receipt,
+)
 
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class ManualReceipt(StatesGroup):
@@ -19,6 +29,8 @@ class ManualReceipt(StatesGroup):
 
 class ReceiptInput(StatesGroup):
     photo = State()
+    review = State()
+    confirmed = State()
 
 
 START_TEXT = (
@@ -37,16 +49,23 @@ MANUAL_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="manual_entry")],
 ])
 
-PHOTO_MENU = InlineKeyboardMarkup(inline_keyboard=[
+RECOGNITION_RETRY_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="📷 Попробовать ещё раз", callback_data="retry_photo")],
     [InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="manual_entry")],
     [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_receipt")],
 ])
 
-PHOTO_RECEIVED_TEXT = (
-    "Фото чека получено ✅\n\n"
-    "На следующем этапе я смогу распознать позиции автоматически.\n\n"
-    "Пока можете ввести позиции вручную."
+UNREADABLE_TEXT = (
+    "Не удалось надёжно распознать чек 😕\n"
+    "Попробуйте сфотографировать его ровно, целиком и при хорошем освещении."
 )
+
+RECOGNITION_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="✅ Всё верно", callback_data="confirm_recognition")],
+    [InlineKeyboardButton(text="✏️ Исправить", callback_data="edit_recognition")],
+    [InlineKeyboardButton(text="🔄 Распознать заново", callback_data="repeat_recognition")],
+    [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_receipt")],
+])
 
 RECEIPT_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="➕ Добавить позицию", callback_data="add_item")],
@@ -61,6 +80,10 @@ async def show_receipt(message: Message, items: list[dict], *, finished: bool = 
     text = heading + "\n\n" + "\n".join(
         f"{index}. {line}" for index, line in enumerate(lines, 1)
     ) + f"\n\nИтого: {total} ₽"
+    await answer_in_parts(message, text, START_MENU if finished else RECEIPT_MENU)
+
+
+async def answer_in_parts(message: Message, text: str, menu: InlineKeyboardMarkup) -> None:
     # Длинный чек отправляем частями; кнопки находятся под последней частью.
     chunks = []
     # 2000 символов укладываются в лимит Telegram и при наличии emoji.
@@ -73,7 +96,58 @@ async def show_receipt(message: Message, items: list[dict], *, finished: bool = 
     chunks.append(text)
     for chunk in chunks[:-1]:
         await message.answer(chunk)
-    await message.answer(chunks[-1], reply_markup=START_MENU if finished else RECEIPT_MENU)
+    await message.answer(chunks[-1], reply_markup=menu)
+
+
+async def recognize_last_photo(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    photo = data.get("receipt_photo")
+    if not photo:
+        await message.answer("Отправьте фотографию чека ещё раз.", reply_markup=RECOGNITION_RETRY_MENU)
+        return
+    # Повторное распознавание инвалидирует предыдущий неподтверждённый результат.
+    await state.set_data({"receipt_photo": photo})
+    await state.set_state(ReceiptInput.photo)
+    await message.answer("Чек получен 🧾\nРаспознаю позиции…")
+    try:
+        with BytesIO() as image:
+            await message.bot.download(photo["file_id"], destination=image, timeout=30)
+            result = await recognize_receipt(image.getvalue())
+    except MissingAPIKey:
+        logger.warning("Receipt recognition is not configured: OPENAI_API_KEY missing")
+        await message.answer(
+            "Распознавание пока не настроено. Пока можете ввести позиции вручную.",
+            reply_markup=RECOGNITION_RETRY_MENU,
+        )
+        return
+    except UnreadableReceipt:
+        logger.info("Receipt recognition returned no reliable items")
+        await message.answer(UNREADABLE_TEXT, reply_markup=RECOGNITION_RETRY_MENU)
+        return
+    except (RecognitionUnavailable, TelegramAPIError, OSError) as error:
+        # Не логируем str(error)/traceback: они могут содержать запрос или секреты.
+        logger.warning("Receipt recognition unavailable: %s", type(error).__name__)
+        await message.answer(
+            "Сервис распознавания временно недоступен. Попробуйте позже или введите позиции вручную.",
+            reply_markup=RECOGNITION_RETRY_MENU,
+        )
+        return
+    await state.update_data(recognition=result.model_dump(mode="json"))
+    await state.set_state(ReceiptInput.review)
+    currency = "₽" if result.currency == "RUB" else (result.currency or "")
+    lines = [
+        f"{index}. {item.name} × {money(Decimal(item.quantity))} — {money(Decimal(item.total_price))} {currency}".rstrip()
+        for index, item in enumerate(result.items, 1)
+    ]
+    text = "Я распознал чек 🧾\n\n" + "\n".join(lines)
+    text += f"\n\nИтого по позициям: {money(result.items_total)} {currency}".rstrip()
+    total = f"{money(Decimal(result.receipt_total))} {currency}".rstrip() if result.receipt_total is not None else "не определён"
+    text += f"\nИтого в чеке: {total}"
+    if result.currency is None:
+        text += "\nВалюта не определена."
+    if result.totals_mismatch:
+        text += "\n\n⚠️ Сумма позиций не совпадает с итогом чека. Проверьте распознавание."
+    await answer_in_parts(message, text, RECOGNITION_MENU)
 
 
 @router.message(CommandStart())
@@ -84,11 +158,14 @@ async def start(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "split_check")
 async def split_check(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() not in (None, ReceiptInput.photo.state):
+    current_state = await state.get_state()
+    if current_state not in (None, ReceiptInput.photo.state, ReceiptInput.confirmed.state):
         await callback.answer("Чек уже открыт. Продолжите ввод или отмените его.")
         return
     await callback.answer()
     if isinstance(callback.message, Message):
+        if current_state == ReceiptInput.confirmed.state:
+            await state.clear()
         await state.set_state(ReceiptInput.photo)
         await callback.message.answer(
             "Отправьте фотографию чека или нажмите кнопку ниже, чтобы ввести позиции вручную.",
@@ -117,7 +194,7 @@ async def how_it_works(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "manual_entry")
 async def manual_entry(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() not in (None, ReceiptInput.photo.state):
+    if await state.get_state() not in (None, ReceiptInput.photo.state, ReceiptInput.review.state):
         await callback.answer("Чек уже открыт. Продолжите ввод или отмените его.")
         return
     await callback.answer()
@@ -132,9 +209,9 @@ async def manual_entry(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(F.photo)
 async def receipt_photo(message: Message, state: FSMContext) -> None:
     current_state = await state.get_state()
-    if current_state == ReceiptInput.photo.state:
+    if current_state in (ReceiptInput.photo.state, ReceiptInput.review.state):
         # Telegram передаёт варианты одного фото; последний — наибольший.
-        # Для будущего OCR достаточно ссылки Telegram и метаданных в памяти FSM.
+        # В FSM остаётся только ссылка: при повторе фото снова скачивается в память.
         photo = message.photo[-1]
         await state.update_data(receipt_photo={
             "file_id": photo.file_id,
@@ -143,7 +220,7 @@ async def receipt_photo(message: Message, state: FSMContext) -> None:
             "height": photo.height,
             "file_size": photo.file_size,
         })
-        await message.answer(PHOTO_RECEIVED_TEXT, reply_markup=PHOTO_MENU)
+        await recognize_last_photo(message, state)
         return
     if current_state in {
         ManualReceipt.name.state, ManualReceipt.price.state,
@@ -164,6 +241,53 @@ async def receipt_photo(message: Message, state: FSMContext) -> None:
         "Чтобы добавить фото чека, нажмите «🧾 Разделить чек» и отправьте фотографию ещё раз.",
         reply_markup=START_MENU,
     )
+
+
+@router.callback_query(F.data == "confirm_recognition")
+async def confirm_recognition(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if await state.get_state() != ReceiptInput.review.state or not data.get("recognition"):
+        await callback.answer("Нет распознанного чека для подтверждения.")
+        return
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        result = RecognizedReceipt.model_validate(data["recognition"])
+        await state.set_data({
+            "items": [item.model_dump(mode="json") for item in result.items],
+            "receipt_total": result.receipt_total,
+            "currency": result.currency,
+        })
+        await state.set_state(ReceiptInput.confirmed)
+        await callback.message.answer("Чек подтверждён ✅", reply_markup=START_MENU)
+
+
+@router.callback_query(F.data == "edit_recognition")
+async def edit_recognition(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if isinstance(callback.message, Message) and await state.get_state() == ReceiptInput.review.state:
+        await callback.message.answer("Редактирование распознанных позиций будет добавлено следующим этапом.")
+
+
+@router.callback_query(F.data == "repeat_recognition")
+async def repeat_recognition(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() not in (ReceiptInput.photo.state, ReceiptInput.review.state):
+        await callback.answer("Последняя фотография больше недоступна. Начните новый чек.")
+        return
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await recognize_last_photo(callback.message, state)
+
+
+@router.callback_query(F.data == "retry_photo")
+async def retry_photo(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() not in (ReceiptInput.photo.state, ReceiptInput.review.state):
+        await callback.answer("Начните разделение нового чека.")
+        return
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await state.clear()
+        await state.set_state(ReceiptInput.photo)
+        await callback.message.answer("Отправьте фотографию чека ещё раз.", reply_markup=RECOGNITION_RETRY_MENU)
 
 
 @router.message(ManualReceipt.name)
