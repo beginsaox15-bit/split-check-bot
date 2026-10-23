@@ -1,0 +1,29 @@
+{
+  "name": "synthetic_shop_discount_duplicates",
+  "image": "synthetic_shop_discount_duplicates.png",
+  "tags": [
+    "straight",
+    "shop",
+    "discount",
+    "duplicates"
+  ],
+  "expected_items": [
+    {
+      "name": "Молоко",
+      "quantity": "1",
+      "total_price": "100.00"
+    },
+    {
+      "name": "Молоко",
+      "quantity": "1",
+      "total_price": "100.00"
+    },
+    {
+      "name": "Хлеб",
+      "quantity": "1",
+      "total_price": "60.00"
+    }
+  ],
+  "expected_total": "250.00",
+  "currency": "RUB"
+}

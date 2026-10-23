@@ -1,0 +1,43 @@
+{
+  "name": "synthetic_restaurant_angled_dark",
+  "image": "synthetic_restaurant_angled_dark.png",
+  "tags": [
+    "angled",
+    "dark",
+    "restaurant"
+  ],
+  "expected_items": [
+    {
+      "name": "Бургер",
+      "quantity": "1",
+      "total_price": "850.00"
+    },
+    {
+      "name": "Коктейль",
+      "quantity": "1",
+      "total_price": "650.00"
+    },
+    {
+      "name": "Чай",
+      "quantity": "1",
+      "total_price": "330.00"
+    },
+    {
+      "name": "Салат",
+      "quantity": "1",
+      "total_price": "570.00"
+    },
+    {
+      "name": "Пицца",
+      "quantity": "1",
+      "total_price": "1250.00"
+    },
+    {
+      "name": "Паста",
+      "quantity": "1",
+      "total_price": "850.00"
+    }
+  ],
+  "expected_total": "4500.00",
+  "currency": "RUB"
+}

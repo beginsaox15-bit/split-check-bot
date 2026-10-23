@@ -221,3 +221,8 @@ __marimo__/
 
 # Локальный кеш моделей OCR и рабочие файлы
 work/
+
+# Локальные OCR benchmark-артефакты и непубликуемые пользовательские чеки
+/artifacts/receipt_benchmark/
+/tests/fixtures/receipts/local/
+/tests/fixtures/receipts/expected/local/
