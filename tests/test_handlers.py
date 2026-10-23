@@ -519,3 +519,15 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         await self.dispatch(self.callback("cancel_receipt"))
         methods = await self.dispatch(self.callback("show_recognized_text"))
         self.assertEqual(len(methods), 1)
+
+    async def test_unexpected_ocr_failure_is_logged_but_hidden_from_telegram(self) -> None:
+        self.recognize.side_effect = ValueError("developer-only diagnostic details")
+        await self.dispatch(self.callback("split_check"))
+        with self.assertLogs("bot.handlers", level="ERROR") as logs:
+            methods = await self.dispatch(self.photo())
+        self.assertIn("Traceback", " ".join(logs.output))
+        self.assertIn("developer-only diagnostic details", " ".join(logs.output))
+        self.assertIn("Сервис распознавания временно недоступен", methods[-1].text)
+        self.assertNotIn("developer-only diagnostic details", methods[-1].text)
+        self.assertNotIn("ValueError", methods[-1].text)
+        self.assertEqual(await self.context().get_state(), ReceiptInput.photo.state)

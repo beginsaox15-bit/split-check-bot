@@ -15,6 +15,7 @@ from bot.services.receipt_models import (
     UnparsedReceipt, UnreadableReceipt,
 )
 from bot.services.receipt_parser import parse_receipt_lines
+from bot.services.receipt_recognition import recognize_receipt
 
 
 def image_bytes(size=(100, 150), *, orientation=None) -> bytes:
@@ -109,16 +110,19 @@ class TesseractBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.raw_text, raw_text)
         self.assertNotIn(raw_text, str(caught.exception))
 
-    async def test_ocr_error_and_timeout_are_sanitized(self) -> None:
+    async def test_ocr_error_and_timeout_keep_traceback_in_developer_logs(self) -> None:
         for error in (pytesseract.TesseractError(1, "sensitive receipt data"),
                       RuntimeError("sensitive receipt data")):
             with self.subTest(error=type(error).__name__):
                 self.ocr.side_effect = error
-                with self.assertLogs(local.__name__, level="WARNING") as logs:
+                with self.assertLogs("bot.services.receipt_recognition", level="ERROR") as logs:
                     with self.assertRaises(RecognitionUnavailable) as caught:
-                        await local.recognize_receipt(image_bytes())
+                        await recognize_receipt(image_bytes())
                 self.assertNotIn("sensitive receipt data", str(caught.exception))
-                self.assertNotIn("sensitive receipt data", " ".join(logs.output))
+                self.assertIs(caught.exception.__cause__, error)
+                self.assertIn("Traceback (most recent call last)", " ".join(logs.output))
+                self.assertIn("sensitive receipt data", " ".join(logs.output))
+                self.assertIn("TESSDATA_PREFIX=", " ".join(logs.output))
 
     async def test_ocr_does_not_block_event_loop(self) -> None:
         started = threading.Event()

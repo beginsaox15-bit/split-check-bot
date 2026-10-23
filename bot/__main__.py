@@ -7,6 +7,7 @@ from aiogram.utils.token import TokenValidationError
 
 from bot.config import load_bot_token
 from bot.handlers import router
+from bot.services.receipt_recognition import log_ocr_runtime
 
 
 async def main() -> None:
@@ -14,6 +15,8 @@ async def main() -> None:
         token = load_bot_token()
     except ValueError as error:
         raise SystemExit(str(error)) from None
+
+    await asyncio.to_thread(log_ocr_runtime)
 
     try:
         bot = Bot(token=token)

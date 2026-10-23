@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from bot.services.receipt_models import RecognizedReceipt, RecognitionUnavailable
 from bot.services.receipt_parser import parse_receipt_lines
-from bot.services.receipt_recognition import recognize_receipt
+from bot.services.receipt_recognition import log_ocr_runtime, recognize_receipt
 
 
 def receipt_payload() -> dict:
@@ -47,6 +47,18 @@ class ReceiptModelTests(unittest.TestCase):
 
 
 class BackendSelectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unexpected_exception_is_logged_and_not_replaced(self) -> None:
+        error = ValueError("unexpected parser failure")
+        with patch.dict(os.environ, {"RECEIPT_OCR_BACKEND": "tesseract"}):
+            with patch("bot.services.receipt_recognition.recognize_local", new_callable=AsyncMock) as local:
+                local.side_effect = error
+                with self.assertLogs("bot.services.receipt_recognition", level="ERROR") as logs:
+                    with self.assertRaises(ValueError) as caught:
+                        await recognize_receipt(b"image")
+                self.assertIs(caught.exception, error)
+                self.assertIn("Traceback", " ".join(logs.output))
+                self.assertIn("unexpected parser failure", " ".join(logs.output))
+
     async def test_default_backend_without_api_key(self) -> None:
         result = parse_receipt_lines(["Пицца 1800"])
         with patch.dict(os.environ, {}, clear=True):
@@ -79,3 +91,24 @@ class BackendSelectionTests(unittest.IsolatedAsyncioTestCase):
                         with self.assertRaises(RecognitionUnavailable):
                             await recognize_receipt(b"image")
                         local.assert_not_awaited()
+
+
+class RuntimeLoggingTests(unittest.TestCase):
+    def test_startup_logs_version_languages_and_prefix_without_running_tesseract(self) -> None:
+        with patch("bot.services.receipt_recognition.pytesseract.get_tesseract_version", return_value="5.5.0"):
+            with patch("bot.services.receipt_recognition.pytesseract.get_languages", return_value=["rus", "eng"]):
+                with patch.dict(os.environ, {"TESSDATA_PREFIX": "/local/tessdata"}):
+                    with self.assertLogs("bot.services.receipt_recognition", level="INFO") as logs:
+                        log_ocr_runtime()
+        text = " ".join(logs.output)
+        self.assertIn("5.5.0", text)
+        self.assertIn("rus", text)
+        self.assertIn("eng", text)
+        self.assertIn("/local/tessdata", text)
+
+    def test_startup_check_logs_failure_but_does_not_disable_manual_input(self) -> None:
+        with patch("bot.services.receipt_recognition.pytesseract.get_tesseract_version", side_effect=OSError("missing binary")):
+            with self.assertLogs("bot.services.receipt_recognition", level="ERROR") as logs:
+                log_ocr_runtime()
+        self.assertIn("Traceback", " ".join(logs.output))
+        self.assertIn("missing binary", " ".join(logs.output))

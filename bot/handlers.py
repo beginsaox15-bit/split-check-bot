@@ -3,7 +3,6 @@ from decimal import Decimal
 from io import BytesIO
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -11,7 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from bot.receipt import money, parse_price, parse_quantity, receipt_lines
 from bot.services.receipt_models import (
-    RecognizedReceipt, RecognitionUnavailable, TesseractLanguagesUnavailable,
+    RecognizedReceipt, TesseractLanguagesUnavailable,
     TesseractNotInstalled, UnparsedReceipt, UnreadableReceipt,
 )
 from bot.services.receipt_recognition import recognize_receipt
@@ -123,7 +122,7 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
             await message.bot.download(photo["file_id"], destination=image, timeout=30)
             result = await recognize_receipt(image.getvalue())
     except (TesseractNotInstalled, TesseractLanguagesUnavailable) as error:
-        logger.warning("Local OCR setup missing: %s", type(error).__name__)
+        logger.exception("Local OCR setup missing: %s", type(error).__name__)
         await message.answer(
             "Локальное распознавание пока не настроено: недоступен Tesseract или языки русского и английского. "
             "Пока можете ввести позиции вручную.",
@@ -144,9 +143,9 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
         logger.info("Receipt recognition returned no reliable items")
         await message.answer(UNREADABLE_TEXT, reply_markup=RECOGNITION_RETRY_MENU)
         return
-    except (RecognitionUnavailable, TelegramAPIError, OSError) as error:
-        # Не логируем str(error)/traceback: они могут содержать запрос или секреты.
-        logger.warning("Receipt recognition unavailable: %s", type(error).__name__)
+    except Exception:
+        # Developer log сохраняет причину и traceback; Telegram получает общий текст.
+        logger.exception("Receipt photo processing failed")
         await message.answer(
             "Сервис распознавания временно недоступен. Попробуйте позже или введите позиции вручную.",
             reply_markup=RECOGNITION_RETRY_MENU,

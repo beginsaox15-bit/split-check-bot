@@ -1,7 +1,6 @@
 """Tesseract rus+eng: лёгкая подготовка Pillow и существующий receipt parser."""
 
 import asyncio
-import logging
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
@@ -15,7 +14,6 @@ from bot.services.receipt_models import (
 from bot.services.receipt_parser import parse_receipt_lines
 
 
-logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="receipt-ocr")
 OCR_LANGUAGES = "rus+eng"
 
@@ -42,8 +40,8 @@ def prepare_image(image: bytes) -> Image.Image:
                     Image.Resampling.LANCZOS,
                 )
         return prepared
-    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
-        raise UnreadableReceipt("Cannot decode image") from None
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as error:
+        raise UnreadableReceipt("Cannot decode image") from error
 
 
 def _recognize_sync(image: bytes) -> RecognizedReceipt:
@@ -56,12 +54,11 @@ def _recognize_sync(image: bytes) -> RecognizedReceipt:
             raw_text = pytesseract.image_to_string(
                 prepared, lang=OCR_LANGUAGES, config="--psm 6", timeout=30,
             ).strip()
-        except (pytesseract.TesseractNotFoundError, FileNotFoundError):
-            raise TesseractNotInstalled("Install Tesseract using scripts/install_tesseract.sh") from None
+        except (pytesseract.TesseractNotFoundError, FileNotFoundError) as error:
+            raise TesseractNotInstalled("Install Tesseract using scripts/install_tesseract.sh") from error
         except (pytesseract.TesseractError, RuntimeError, OSError) as error:
-            # Не логируем текст, фото или содержимое исключения движка.
-            logger.warning("Tesseract unavailable: type=%s", type(error).__name__)
-            raise RecognitionUnavailable(type(error).__name__) from None
+            # Сохраняем исходную причину для traceback в receipt_recognition.
+            raise RecognitionUnavailable(type(error).__name__) from error
     if not raw_text:
         raise UnreadableReceipt("No recognized text")
     try:

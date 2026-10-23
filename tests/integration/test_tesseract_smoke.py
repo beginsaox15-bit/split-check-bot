@@ -6,11 +6,17 @@ import unittest
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytesseract
 from PIL import Image, ImageDraw, ImageFont
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
 
-from bot.services.tesseract_receipt_recognition import recognize_receipt
+from bot.handlers import ReceiptInput, recognize_last_photo
+from bot.services.receipt_models import RecognizedReceipt
 
 
 class TesseractSmokeTests(unittest.IsolatedAsyncioTestCase):
@@ -30,8 +36,30 @@ class TesseractSmokeTests(unittest.IsolatedAsyncioTestCase):
             )
             with BytesIO() as buffer:
                 image.save(buffer, format="PNG")
-                result = await recognize_receipt(buffer.getvalue())
+                image_data = buffer.getvalue()
+        # Подменяется только Telegram: handler -> facade -> Pillow -> Tesseract
+        # -> существующий parser -> состояние проверки работают по-настоящему.
+        async def download(file_id, *, destination, timeout):
+            destination.write(image_data)
+            return destination
+
+        message = SimpleNamespace(
+            bot=SimpleNamespace(download=AsyncMock(side_effect=download)),
+            answer=AsyncMock(),
+        )
+        storage = MemoryStorage()
+        state = FSMContext(storage=storage, key=StorageKey(bot_id=1, chat_id=1, user_id=1))
+        try:
+            await state.set_data({"receipt_photo": {"file_id": "synthetic-smoke-image"}})
+            await recognize_last_photo(message, state)
+            data = await state.get_data()
+            self.assertEqual(await state.get_state(), ReceiptInput.review.state)
+            result = RecognizedReceipt.model_validate(data["recognition"])
+        finally:
+            await storage.close()
         self.assertEqual([item.name for item in result.items], ["Пицца", "Coffee"])
         self.assertEqual(result.items_total, Decimal("2000.00"))
         self.assertFalse(result.totals_mismatch)
         self.assertIn("ИТОГО", result.raw_text)
+        self.assertIn("Итого по найденным позициям: 2000", message.answer.await_args.args[0])
+        self.assertIn("Проверьте позиции", message.answer.await_args.args[0])
