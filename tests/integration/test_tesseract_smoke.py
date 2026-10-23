@@ -6,16 +6,18 @@ import unittest
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytesseract
 from PIL import Image, ImageDraw, ImageFont
+from aiogram import Bot, Dispatcher
+from aiogram.methods import SendMessage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import Update
 
-from bot.handlers import ReceiptInput, recognize_last_photo
+from bot.handlers import ReceiptInput, router
 from bot.services.receipt_models import RecognizedReceipt
 
 
@@ -37,29 +39,45 @@ class TesseractSmokeTests(unittest.IsolatedAsyncioTestCase):
             with BytesIO() as buffer:
                 image.save(buffer, format="PNG")
                 image_data = buffer.getvalue()
-        # Подменяется только Telegram: handler -> facade -> Pillow -> Tesseract
-        # -> существующий parser -> состояние проверки работают по-настоящему.
+        # Настоящий photo Update проходит через dispatcher, фильтры и handler.
+        # Подменяется только Telegram; OCR и parser работают по-настоящему.
         async def download(file_id, *, destination, timeout):
             destination.write(image_data)
             return destination
 
-        message = SimpleNamespace(
-            bot=SimpleNamespace(download=AsyncMock(side_effect=download)),
-            answer=AsyncMock(),
-        )
         storage = MemoryStorage()
-        state = FSMContext(storage=storage, key=StorageKey(bot_id=1, chat_id=1, user_id=1))
-        try:
-            await state.set_data({"receipt_photo": {"file_id": "synthetic-smoke-image"}})
-            await recognize_last_photo(message, state)
-            data = await state.get_data()
-            self.assertEqual(await state.get_state(), ReceiptInput.review.state)
-            result = RecognizedReceipt.model_validate(data["recognition"])
-        finally:
-            await storage.close()
+        dispatcher = Dispatcher(storage=storage)
+        dispatcher.include_router(router)
+        async with Bot(token="123456:TEST_TOKEN") as bot:
+            state = FSMContext(storage=storage, key=StorageKey(bot_id=bot.id, chat_id=1, user_id=1))
+            update = Update.model_validate({"update_id": 1, "message": {
+                "message_id": 1, "date": 1,
+                "chat": {"id": 1, "type": "private"},
+                "from": {"id": 1, "is_bot": False, "first_name": "Smoke"},
+                "photo": [
+                    {"file_id": "small-image", "file_unique_id": "small", "width": 90, "height": 27},
+                    {"file_id": "synthetic-smoke-image", "file_unique_id": "large",
+                     "width": 1200, "height": 360, "file_size": len(image_data)},
+                ],
+            }})
+            try:
+                await state.set_state(ReceiptInput.photo)
+                with patch.dict(os.environ, {"OPENAI_API_KEY": "", "RECEIPT_OCR_BACKEND": ""}), \
+                        patch.object(bot, "download", new_callable=AsyncMock, side_effect=download) as fetch, \
+                        patch.object(bot.session, "make_request", new_callable=AsyncMock) as request:
+                    await dispatcher.feed_update(bot, update)
+                fetch.assert_awaited_once()
+                self.assertEqual(fetch.await_args.args[0], "synthetic-smoke-image")
+                data = await state.get_data()
+                self.assertEqual(await state.get_state(), ReceiptInput.review.state)
+                result = RecognizedReceipt.model_validate(data["recognition"])
+                replies = [call.args[1].text for call in request.await_args_list
+                           if isinstance(call.args[1], SendMessage)]
+            finally:
+                await storage.close()
         self.assertEqual([item.name for item in result.items], ["Пицца", "Coffee"])
         self.assertEqual(result.items_total, Decimal("2000.00"))
         self.assertFalse(result.totals_mismatch)
         self.assertIn("ИТОГО", result.raw_text)
-        self.assertIn("Итого по найденным позициям: 2000", message.answer.await_args.args[0])
-        self.assertIn("Проверьте позиции", message.answer.await_args.args[0])
+        self.assertIn("Итого по найденным позициям: 2000", replies[-1])
+        self.assertIn("Проверьте позиции", replies[-1])

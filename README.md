@@ -147,6 +147,23 @@ Tesseract вызывается с `lang="rus+eng"`, `--psm 6` и тайм-аут
 предыдущий процесс (включая другие облачные задачи), затем запускайте новый.
 Это ошибка получения обновлений Telegram, а не ошибка Tesseract.
 
+При обновлении работающего экземпляра сверяйте checkout с `origin/main`:
+
+```bash
+git fetch origin main
+git merge --ff-only origin/main
+python -m pip install -r requirements.txt
+python -m pip check
+```
+
+После проверки тестов остановите старый процесс и запустите бота заново
+тем же Python, с теми же `BOT_TOKEN` и `TESSDATA_PREFIX`. Уже работающий Python
+не подхватывает обновлённые модули автоматически. Установка Tesseract сама
+по себе не меняет backend старого checkout: версия `7156c5f` использует только
+OpenAI и без `OPENAI_API_KEY` отвечает «Распознавание пока не настроено».
+В актуальном checkout Tesseract используется по умолчанию; проверьте в логе
+нового процесса `backend=tesseract` и наличие `rus` и `eng`.
+
 ## Ручной ввод чека
 
 Нажмите «🧾 Разделить чек» → «✍️ Ввести вручную». Бот последовательно спросит
@@ -201,7 +218,9 @@ python -m unittest discover -s tests -v
 ```
 
 Отдельный integration/smoke-тест запускает настоящий Tesseract на синтетическом
-чеке с русским и английским текстом, затем проверяет позиции и `Decimal`-сумму:
+PNG-чеке с русским и английским текстом через dispatcher и photo handler,
+без `OPENAI_API_KEY` и явного выбора backend. Затем он проверяет состояние
+проверки чека, текст ответа, позиции и `Decimal`-сумму:
 
 ```bash
 python -m unittest discover -s tests/integration -v
