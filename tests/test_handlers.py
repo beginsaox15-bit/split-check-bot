@@ -282,11 +282,11 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(methods), 2)
         self.assertIsInstance(methods[0], SendMessage)
         self.assertEqual(methods[0].chat_id, 42)
-        self.assertEqual(methods[0].text, "Чек получен 🧾\nРаспознаю позиции…")
+        self.assertEqual(methods[0].text, "Чек получен 🧾\nРаспознаю текст…")
         self.assertEqual(methods[1].text,
                          "Я распознал чек 🧾\n\n1. Бургер × 2 — 1700 ₽\n"
-                         "2. Коктейль × 1 — 650 ₽\n\n"
-                         "Итого по позициям: 2350 ₽\nИтого в чеке: 2350 ₽")
+                         "2. Коктейль — 650 ₽\n\n"
+                         "Итого по найденным позициям: 2350 ₽\nИтого в чеке: 2350 ₽\n\nПроверьте позиции перед подтверждением.")
         self.assert_buttons(methods[1], [
             [("✅ Всё верно", "confirm_recognition")],
             [("✏️ Исправить", "edit_recognition")],
@@ -393,9 +393,9 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.recognize.return_value.receipt_total = "2400.00"
         await self.dispatch(self.callback("split_check"))
         methods = await self.dispatch(self.photo())
-        self.assertIn("Итого по позициям: 2350 ₽", methods[-1].text)
+        self.assertIn("Итого по найденным позициям: 2350 ₽", methods[-1].text)
         self.assertIn("Итого в чеке: 2400 ₽", methods[-1].text)
-        self.assertIn("⚠️ Сумма позиций не совпадает с итогом чека. Проверьте распознавание.", methods[-1].text)
+        self.assertIn("⚠️ OCR мог распознать чек неточно. Сумма позиций не совпадает с итогом чека.", methods[-1].text)
 
     async def test_recognition_errors_offer_retry_manual_and_cancel(self) -> None:
         for error, expected in (
@@ -450,7 +450,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 self.recognize.return_value.receipt_total = None
                 methods = await self.dispatch(self.photo())
                 self.assertNotIn("₽", methods[-1].text)
-                self.assertIn("Итого в чеке: не определён", methods[-1].text)
+                self.assertNotIn("Итого в чеке:", methods[-1].text)
                 if currency is None:
                     self.assertIn("Валюта не определена", methods[-1].text)
                 else:

@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Локальный кеш моделей OCR и рабочие файлы
+work/

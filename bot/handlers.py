@@ -108,7 +108,7 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
     # Повторное распознавание инвалидирует предыдущий неподтверждённый результат.
     await state.set_data({"receipt_photo": photo})
     await state.set_state(ReceiptInput.photo)
-    await message.answer("Чек получен 🧾\nРаспознаю позиции…")
+    await message.answer("Чек получен 🧾\nРаспознаю текст…")
     try:
         with BytesIO() as image:
             await message.bot.download(photo["file_id"], destination=image, timeout=30)
@@ -136,17 +136,21 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
     await state.set_state(ReceiptInput.review)
     currency = "₽" if result.currency == "RUB" else (result.currency or "")
     lines = [
-        f"{index}. {item.name} × {money(Decimal(item.quantity))} — {money(Decimal(item.total_price))} {currency}".rstrip()
+        f"{index}. {item.name}"
+        + (f" × {money(Decimal(item.quantity))}" if Decimal(item.quantity) != 1 else "")
+        + f" — {money(Decimal(item.total_price))} {currency}".rstrip()
         for index, item in enumerate(result.items, 1)
     ]
     text = "Я распознал чек 🧾\n\n" + "\n".join(lines)
-    text += f"\n\nИтого по позициям: {money(result.items_total)} {currency}".rstrip()
-    total = f"{money(Decimal(result.receipt_total))} {currency}".rstrip() if result.receipt_total is not None else "не определён"
-    text += f"\nИтого в чеке: {total}"
+    text += f"\n\nИтого по найденным позициям: {money(result.items_total)} {currency}".rstrip()
+    if result.receipt_total is not None:
+        total = f"{money(Decimal(result.receipt_total))} {currency}".rstrip()
+        text += f"\nИтого в чеке: {total}"
     if result.currency is None:
         text += "\nВалюта не определена."
     if result.totals_mismatch:
-        text += "\n\n⚠️ Сумма позиций не совпадает с итогом чека. Проверьте распознавание."
+        text += "\n\n⚠️ OCR мог распознать чек неточно. Сумма позиций не совпадает с итогом чека."
+    text += "\n\nПроверьте позиции перед подтверждением."
     await answer_in_parts(message, text, RECOGNITION_MENU)
 
 

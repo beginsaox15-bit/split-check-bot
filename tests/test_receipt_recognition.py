@@ -6,13 +6,16 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import httpx
-from openai import APIConnectionError, AsyncOpenAI
+try:
+    import httpx
+    from openai import APIConnectionError, AsyncOpenAI
+    from bot.services.openai_receipt_recognition import recognize_receipt
+except ImportError:
+    AsyncOpenAI = None
 from pydantic import ValidationError
 
-from bot.services.receipt_recognition import (
+from bot.services.receipt_models import (
     MissingAPIKey, RecognizedReceipt, RecognitionUnavailable, UnreadableReceipt,
-    recognize_receipt,
 )
 
 
@@ -27,6 +30,7 @@ def receipt_payload() -> dict:
     }
 
 
+@unittest.skipIf(AsyncOpenAI is None, "Optional OpenAI dependencies are not installed")
 class RecognitionServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.parse = AsyncMock(return_value=SimpleNamespace(
@@ -90,7 +94,7 @@ class RecognitionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.parse.side_effect = APIConnectionError(
             message=secret, request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
         )
-        with self.assertLogs("bot.services.receipt_recognition", level="WARNING") as logs:
+        with self.assertLogs("bot.services.openai_receipt_recognition", level="WARNING") as logs:
             with self.assertRaises(RecognitionUnavailable) as error:
                 await recognize_receipt(b"image", client=self.client)
         self.assertNotIn(secret, str(error.exception))
@@ -99,7 +103,7 @@ class RecognitionServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_key_does_not_construct_client_or_request_api(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            with patch("bot.services.receipt_recognition.AsyncOpenAI") as client:
+            with patch("bot.services.openai_receipt_recognition.AsyncOpenAI") as client:
                 with self.assertRaises(MissingAPIKey):
                     await recognize_receipt(b"image")
         client.assert_not_called()
