@@ -18,6 +18,7 @@ class ReceiptItem(BaseModel):
     quantity: Quantity = Field(description="Положительное количество десятичной строкой, например '2' или '0.5'.")
     unit_price: Money | None
     total_price: Money
+    guest_id: str | None = None
 
     @field_validator("name")
     @classmethod
@@ -42,6 +43,36 @@ class RecognizedReceipt(BaseModel):
     receipt_total: Money | None
     currency: Annotated[str, Field(pattern=r"^[A-Z]{3}$")] | None
     raw_text: str = ""
+    gross_total: Money | None = None
+    prepayment: Money | None = None
+    amount_due: Money | None = None
+    guest_subtotals: dict[str, Money] = Field(default_factory=dict)
+    skipped_lines: int = Field(default=0, ge=0)
+    parse_warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def comparison_total(self) -> Decimal | None:
+        if self.gross_total is not None:
+            return Decimal(self.gross_total)
+        if self.prepayment is not None and self.amount_due is not None:
+            return Decimal(self.prepayment) + Decimal(self.amount_due)
+        return Decimal(self.receipt_total) if self.receipt_total is not None else None
+
+    @property
+    def guest_subtotals_total(self) -> Decimal:
+        with localcontext() as context:
+            context.prec = 32
+            return sum((Decimal(value) for value in self.guest_subtotals.values()), Decimal(0))
+
+    @property
+    def guest_subtotals_mismatch(self) -> bool:
+        return bool(self.guest_subtotals) and self.comparison_total is not None and self.guest_subtotals_total != self.comparison_total
+
+    @property
+    def payment_mismatch(self) -> bool:
+        if self.gross_total is None or self.prepayment is None or self.amount_due is None:
+            return False
+        return Decimal(self.gross_total) - Decimal(self.prepayment) != Decimal(self.amount_due)
 
     @property
     def items_total(self) -> Decimal:
@@ -52,7 +83,7 @@ class RecognizedReceipt(BaseModel):
 
     @property
     def totals_mismatch(self) -> bool:
-        return self.receipt_total is not None and self.items_total != Decimal(self.receipt_total)
+        return self.comparison_total is not None and self.items_total != self.comparison_total
 
 
 class RecognitionError(Exception):

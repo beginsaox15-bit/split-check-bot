@@ -160,19 +160,35 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
     currency = "₽" if result.currency == "RUB" else (result.currency or "")
     lines = [
         f"{index}. {item.name}"
+        + (f" (гость {item.guest_id})" if item.guest_id else "")
         + (f" × {money(Decimal(item.quantity))}" if Decimal(item.quantity) != 1 else "")
         + f" — {money(Decimal(item.total_price))} {currency}".rstrip()
         for index, item in enumerate(result.items, 1)
     ]
     text = "Я распознал чек 🧾\n\n" + "\n".join(lines)
     text += f"\n\nИтого по найденным позициям: {money(result.items_total)} {currency}".rstrip()
-    if result.receipt_total is not None:
+    if any(value is not None for value in (result.gross_total, result.prepayment, result.amount_due)):
+        for label, value in (("Полная сумма", result.gross_total), ("Предоплата", result.prepayment),
+                             ("Итого к оплате", result.amount_due)):
+            if value is not None:
+                text += f"\n{label}: {money(Decimal(value))} {currency}".rstrip()
+    elif result.receipt_total is not None:
         total = f"{money(Decimal(result.receipt_total))} {currency}".rstrip()
         text += f"\nИтого в чеке: {total}"
     if result.currency is None:
         text += "\nВалюта не определена."
     if result.totals_mismatch:
         text += "\n\n⚠️ OCR мог распознать чек неточно. Сумма позиций не совпадает с итогом чека."
+    if result.guest_subtotals:
+        text += f"\nСумма итогов гостей: {money(result.guest_subtotals_total)} {currency}".rstrip()
+    if result.guest_subtotals_mismatch:
+        text += "\n⚠️ Сумма итогов гостей не совпадает с полной суммой чека."
+    if result.payment_mismatch:
+        text += "\n⚠️ Полная сумма минус предоплата не совпадает с суммой к оплате."
+    if result.skipped_lines:
+        text += f"\n⚠️ Сомнительные строки пропущены: {result.skipped_lines}. Проверьте чек."
+    for warning in result.parse_warnings:
+        text += "\n⚠️ " + warning
     text += "\n\nПроверьте позиции перед подтверждением."
     await answer_in_parts(message, text, RECOGNITION_MENU)
 
@@ -280,9 +296,13 @@ async def confirm_recognition(callback: CallbackQuery, state: FSMContext) -> Non
     if isinstance(callback.message, Message):
         result = RecognizedReceipt.model_validate(data["recognition"])
         await state.set_data({
-            "items": [item.model_dump(mode="json") for item in result.items],
+            "items": [item.model_dump(mode="json", exclude={"guest_id"} if item.guest_id is None else set()) for item in result.items],
             "receipt_total": result.receipt_total,
             "currency": result.currency,
+            "gross_total": result.gross_total,
+            "prepayment": result.prepayment,
+            "amount_due": result.amount_due,
+            "guest_subtotals": result.guest_subtotals,
         })
         await state.set_state(ReceiptInput.confirmed)
         await callback.message.answer("Чек подтверждён ✅", reply_markup=START_MENU)

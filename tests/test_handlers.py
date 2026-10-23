@@ -15,6 +15,39 @@ from bot.services.receipt_models import (
 
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_guest_receipt_displays_and_preserves_payment_totals(self) -> None:
+        from pathlib import Path
+        from bot.services.receipt_parser import parse_receipt_lines
+        rows = (Path(__file__).parent / "fixtures/receipts/long_restaurant_guest_receipt.txt").read_text().splitlines()
+        self.recognize.return_value = parse_receipt_lines(rows)
+        await self.dispatch(self.callback("split_check"))
+        methods = await self.dispatch(self.photo())
+        text = methods[-1].text
+        self.assertIn("Полная сумма: 41902.5 ₽", text)
+        self.assertIn("Предоплата: 7000 ₽", text)
+        self.assertIn("Итого к оплате: 34902.5 ₽", text)
+        self.assertIn("Сумма итогов гостей: 41902.5 ₽", text)
+        self.assertNotIn("не совпадает", text)
+        await self.dispatch(self.callback("confirm_recognition"))
+        data = await self.context().get_data()
+        self.assertEqual(data["gross_total"], "41902.5")
+        self.assertEqual(data["prepayment"], "7000")
+        self.assertEqual(data["amount_due"], "34902.5")
+        self.assertEqual(data["items"][0]["guest_id"], "1")
+        self.assertEqual(len(data["guest_subtotals"]), 3)
+
+    async def test_guest_math_and_skipped_line_warnings(self) -> None:
+        from bot.services.receipt_parser import parse_receipt_lines
+        self.recognize.return_value = parse_receipt_lines([
+            "Гость 1", "а б в 999.00", "Чай 1 330.00", "Итого к оплате Гость 1: 400",
+            "Полная сумма 330", "Предоплата 100", "Итого к оплате 200",
+        ])
+        await self.dispatch(self.callback("split_check"))
+        text = (await self.dispatch(self.photo()))[-1].text
+        self.assertIn("Сумма итогов гостей не совпадает", text)
+        self.assertIn("Полная сумма минус предоплата не совпадает", text)
+        self.assertIn("Сомнительные строки пропущены", text)
+
     async def test_low_quality_ocr_keeps_raw_text_button_without_creating_items(self) -> None:
         from bot.services.receipt_models import LowQualityReceipt
         await self.dispatch(self.callback("split_check"))

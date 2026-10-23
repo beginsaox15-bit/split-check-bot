@@ -56,6 +56,17 @@ class ExpectedReceipt(BaseModel):
     expected_items: list[ExpectedItem] = Field(min_length=1)
     expected_total: str | None = Field(pattern=NUMBER)
     currency: str | None = Field(pattern=r"^[A-Z]{3}$")
+    expected_gross_total: str | None = Field(default=None, pattern=NUMBER)
+    expected_prepayment: str | None = Field(default=None, pattern=NUMBER)
+    expected_amount_due: str | None = Field(default=None, pattern=NUMBER)
+    expected_guest_subtotals: dict[str, str] | None = None
+
+    @field_validator("expected_guest_subtotals")
+    @classmethod
+    def valid_guest_subtotals(cls, value):
+        if value is not None and any(not re.fullmatch(NUMBER, amount) for amount in value.values()):
+            raise ValueError("Guest subtotals must be decimal strings")
+        return value
 
 
 def normalized_name(value: str) -> str:
@@ -180,7 +191,17 @@ async def run_case(case: ExpectedReceipt, image: Path, artifacts: Path | None) -
             "psm": candidate.psm if candidate else None,
             "preprocessing": candidate.preprocessing if candidate else None,
             "elapsed_seconds": round(elapsed, 3), "error": error_type,
+            "items_total": str(result.items_total) if result is not None else None,
         }
+        for name in ("gross_total", "prepayment", "amount_due"):
+            actual = getattr(result, name) if result is not None else None
+            row[name] = actual
+            if "expected_" + name in case.model_fields_set:
+                row[name + "_correct"] = result is not None and equal_total(getattr(case, "expected_" + name), actual)
+        row["guest_subtotals"] = result.guest_subtotals if result is not None else {}
+        if case.expected_guest_subtotals is not None:
+            row["guest_subtotals_correct"] = result is not None and ({key: Decimal(value) for key, value in row["guest_subtotals"].items()}
+                                              == {key: Decimal(value) for key, value in case.expected_guest_subtotals.items()})
         if artifacts is not None:
             directory = artifacts / case.name
             directory.mkdir(parents=True, exist_ok=True)
@@ -212,10 +233,15 @@ def print_case(row):
     print(f"\n{row['name']} ({row['file']}):")
     print(f"  lines: {row['lines']} | items: {row['found']}/{row['expected']} | missing: {row['missing']}")
     print(f"  false positives: {row['false_positives']}")
+    if "items_total" in row:
+        print(f"  items total: {row['items_total']}")
     total_status = "OK" if row["total_correct"] else f"FAIL (expected {row['expected_total']}, got {row['actual_total']})"
     currency_status = "OK" if row["currency_correct"] else f"FAIL (expected {row['expected_currency']})"
     print(f"  total: {total_status} | currency: {row['actual_currency'] or '-'} {currency_status}")
     print(f"  PSM: {row['psm']} | preprocessing: {row['preprocessing']} | time: {row['elapsed_seconds']:.2f}s | status: {row['status']}")
+    for name in ("gross_total", "prepayment", "amount_due", "guest_subtotals"):
+        if name + "_correct" in row:
+            print(f"  {name}: {row[name]} {'OK' if row[name + '_correct'] else 'FAIL'}")
     if row["error"]:
         print(f"  error: {row['error']}")
 

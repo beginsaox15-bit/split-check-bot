@@ -29,6 +29,15 @@ SERVICE = re.compile(
 )
 DATE_TIME = re.compile(r"\b(?:[0-3]?\d[./-][01]?\d[./-](?:20)?\d{2}|20\d{2}-\d{2}-\d{2}|\d{1,2}:\d{2}(?::\d{2})?)\b")
 CURRENCY_SUFFIX = re.compile(r"\s*(?:₽|руб\.?|р\.|RUB|USD|EUR|€|\$)\s*$", re.I)
+GUEST_TOTAL = re.compile(r"^(?:и?того|игого|подытог)(?:\s+к\s+оплате)?\s+г?ость\s*[:№#]?\s*(?P<guest>\d{1,3})\b(?P<value>.*)$", re.I)
+GUEST = re.compile(r"^г?ость\s*[:№#]?\s*(?P<guest>\d{1,3})\b(?P<value>.*)$", re.I)
+SUMMARY_LABELS = (
+    ("gross_total", re.compile(r"^(?:полная\s+сумма|gross total)\b(?P<value>.*)$", re.I)),
+    ("prepayment", re.compile(r"^(?:предоплата|аванс|prepayment)\b(?P<value>.*)$", re.I)),
+    ("amount_due", re.compile(r"^(?:(?:и?того|игого)\s+к\s+оплате|к\s+оплате|amount due)\b(?P<value>.*)$", re.I)),
+)
+RESTAURANT_SERVICE = re.compile(r"^(?:гость|ость|стол|cron|стоп|заказ|официант|оеициант|гостевой|ресторан|открыт|закрыт|сч[её]т|кол[\s.-]*во|кой[\s.-]*во|оплатить|чаевые|отзыв)\b", re.I)
+THREE_COLUMNS = re.compile(rf"^(?P<name>.*?\S)\s+(?P<quantity>[0-9]+(?:[.,][0-9]{{1,6}})?)\s+(?P<total>{AMOUNT})$")
 RUBLE_MARKER = re.compile(r"₽|\b(?:руб|RUB)\b", re.I)
 RUSSIAN_FISCAL = re.compile(r"\b(?:ИНН|ККТ|ККМ|ФН|ФД|ФПД|ОФД|ФФД)\b", re.I)
 DOLLAR_MARKER = re.compile(r"\bUSD\b|\$\s*\d|\d\s*\$", re.I)
@@ -65,7 +74,7 @@ def decimal_text(value: Decimal) -> str:
 
 def make_item(name: str, quantity: Decimal, unit: Decimal | None, total: Decimal) -> ReceiptItem | None:
     name = re.sub(r"^\d{1,3}[.)]\s*", "", name).strip(" .-=:")
-    if not name or not re.search(r"[A-Za-zА-Яа-яЁё]", name) or SERVICE.match(name):
+    if not plausible_name(name):
         return None
     if quantity <= 0 or total <= 0:
         return None
@@ -79,29 +88,110 @@ def make_item(name: str, quantity: Decimal, unit: Decimal | None, total: Decimal
         return None
 
 
+def plausible_name(name: str) -> bool:
+    if not name or SERVICE.match(name) or RESTAURANT_SERVICE.match(name):
+        return False
+    if any(pattern.match(name) for _, pattern in SUMMARY_LABELS) or TOTAL.match(name):
+        return False
+    if re.search(r"\b(?:наименование|официант|оеициант|предоплата|итого|кол[\s.-]*во|гость\s*\d|стол\s*\d)\b", name, re.I):
+        return False
+    tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", name)
+    if sum(map(len, tokens)) < len(name.replace(" ", "")) * .55:
+        return False
+    words = [token for token in tokens if re.search(r"[A-Za-zА-Яа-яЁё]", token)]
+    solid = [token for token in words if len(token) >= 3 and len(re.findall(r"[A-Za-zА-Яа-яЁё]", token)) >= 2]
+    if not solid or len(solid) < len(words) / 2:
+        return False
+    # Не склеиваем обрывки разных алфавитов внутри слова и числовые колонки.
+    if any(re.search(r"[A-Za-z]", word) and re.search(r"[А-Яа-яЁё]", word) for word in words):
+        return False
+    return not re.search(r"\s\d+(?:[.,]\d+)?\s*$", name)
+
+
 def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
-    items = []
-    receipt_total = None
+    items, guest_subtotals, totals, warnings = [], {}, {}, []
     pending_name = None
-    awaiting_total = False
+    pending_summary = None
+    current_guest = None
+    guest_block_start = 0
+    skipped = 0
+    prepayment_seen = False
     currency = detect_currency(lines)
+    restaurant = any(GUEST.match(normalize(line)) or GUEST_TOTAL.match(normalize(line)) for line in lines)
+
+    def warn(message):
+        if message not in warnings:
+            warnings.append(message)
+
+    def set_summary(kind, guest, value):
+        target, key = (guest_subtotals, guest) if kind == "guest" else (totals, kind)
+        amount = decimal_text(decimal_value(value))
+        if len(amount.split(".")[0]) > 12:
+            warn("Не все итоговые суммы удалось прочитать. Проверьте чек.")
+            return
+        if key in target and target[key] != amount:
+            warn("Повторные итоговые значения различаются. Проверьте чек.")
+        else:
+            target[key] = amount
+
+    def summary_amount(value):
+        value = value.strip(" :;=—")
+        return value if re.fullmatch(AMOUNT, value) else None
+
     for raw in lines:
-        line = normalize(raw)
+        line = CURRENCY_SUFFIX.sub("", normalize(raw)).strip()
         if not line:
             continue
-        line = CURRENCY_SUFFIX.sub("", line).strip()
-        if TOTAL.match(line):
-            tail = TAIL_AMOUNT.search(line)
-            receipt_total = decimal_text(decimal_value(tail["amount"])) if tail else None
-            awaiting_total = tail is None
-            pending_name = None
-            continue
-        if awaiting_total:
-            awaiting_total = False
-            if re.fullmatch(AMOUNT, line):
-                receipt_total = decimal_text(decimal_value(line))
+        if pending_summary:
+            kind, guest = pending_summary
+            pending_summary = None
+            value = summary_amount(line)
+            if value is not None:
+                set_summary(kind, guest, value)
                 continue
-        if SERVICE.match(line) or DATE_TIME.search(line) or "://" in line or "www." in line.lower():
+            warn("Не все итоговые суммы удалось прочитать. Проверьте чек.")
+        guest_total, guest_header = GUEST_TOTAL.match(line), GUEST.match(line)
+        if guest_total:
+            kind, guest, rest = "guest", guest_total["guest"], guest_total["value"]
+            if current_guest is not None and current_guest != guest:
+                warn("Номера гостей в заголовке и подытоге различаются. Проверьте чек.")
+            else:
+                for item in items[guest_block_start:]:
+                    item.guest_id = guest
+            current_guest = None
+            guest_block_start = len(items)
+        elif guest_header:
+            current_guest = guest_header["guest"]
+            guest_block_start = len(items)
+            pending_name = None
+            # Некоторые чеки печатают подытог прямо в строке заголовка гостя.
+            rest = re.sub(r"^[ :;—-]*(?:итог(?:о)?[ :;]*)?", "", guest_header["value"], flags=re.I)
+            if rest and summary_amount(rest) is not None:
+                set_summary("guest", current_guest, rest)
+            continue
+        else:
+            summary = next(((kind, pattern.match(line)) for kind, pattern in SUMMARY_LABELS if pattern.match(line)), None)
+            if summary:
+                kind, match = summary
+                guest, rest = None, match["value"]
+            elif TOTAL.match(line):
+                kind, guest, rest = "receipt_total", None, line[TOTAL.match(line).end():]
+            else:
+                kind = None
+        if kind is not None:
+            pending_name = None
+            if kind == "prepayment":
+                prepayment_seen = True
+            value = summary_amount(rest)
+            if value is not None:
+                set_summary(kind, guest, value)
+            elif not rest.strip(" :;=—"):
+                pending_summary = (kind, guest)
+            else:
+                warn("Не все итоговые суммы удалось прочитать. Проверьте чек.")
+            continue
+        if (SERVICE.match(line) or RESTAURANT_SERVICE.match(line) or DATE_TIME.search(line)
+                or "://" in line or "www." in line.lower()):
             pending_name = None
             continue
         item = None
@@ -115,26 +205,44 @@ def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
             item = make_item(name, quantity, unit, total)
         else:
             columns = COLUMNS.fullmatch(line)
-            if columns:
+            three = THREE_COLUMNS.fullmatch(line) if restaurant else None
+            if columns and (not three or decimal_value(columns["quantity"]) * decimal_value(columns["price"]) == decimal_value(columns["total"])):
                 item = make_item(columns["name"], decimal_value(columns["quantity"]),
                                  decimal_value(columns["price"]), decimal_value(columns["total"]))
+            elif three:
+                item = make_item(three["name"], decimal_value(three["quantity"]), None, decimal_value(three["total"]))
             else:
                 tail = TAIL_AMOUNT.search(line)
                 if tail:
                     if line[:tail.start()].rstrip().endswith(("-", "−")):
+                        skipped += 1
                         pending_name = None
                         continue
                     name = line[:tail.start()].strip(" =—:") or pending_name or ""
                     total = decimal_value(tail["amount"])
                     item = make_item(name, Decimal(1), None, total)
         if item:
+            item.guest_id = current_guest
             items.append(item)
             pending_name = None
-        elif re.search(r"[A-Za-zА-Яа-яЁё]", line):
-            # Распространённый формат: название на строке перед ценой/количеством.
+        elif plausible_name(line) and not re.search(r"\d+[.,]\d{2}\s*$", line):
+            # Перенос названия разрешён только на непосредственно следующую строку.
+            if pending_name is not None:
+                skipped += 1
             pending_name = line
         else:
+            skipped += 1
             pending_name = None
+    if pending_summary:
+        warn("Не все итоговые суммы удалось прочитать. Проверьте чек.")
     if not items or len(items) > 200:
         raise UnreadableReceipt("No reliable purchase lines found")
-    return RecognizedReceipt(readable=True, items=items, receipt_total=receipt_total, currency=currency)
+    receipt_total = totals.get("gross_total")
+    if receipt_total is None and not prepayment_seen:
+        receipt_total = totals.get("receipt_total", totals.get("amount_due"))
+    return RecognizedReceipt(
+        readable=True, items=items, receipt_total=receipt_total, currency=currency,
+        gross_total=totals.get("gross_total"), prepayment=totals.get("prepayment"),
+        amount_due=totals.get("amount_due"), guest_subtotals=guest_subtotals,
+        skipped_lines=skipped, parse_warnings=warnings,
+    )

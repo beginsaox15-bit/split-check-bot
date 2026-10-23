@@ -1,0 +1,93 @@
+{
+  "name": "long_restaurant_guest_receipt",
+  "image": "long_restaurant_guest_receipt.png",
+  "tags": [
+    "long_restaurant_guest_receipt",
+    "long",
+    "restaurant",
+    "guests",
+    "prepayment"
+  ],
+  "expected_items": [
+    {
+      "name": "Бургер",
+      "quantity": "2",
+      "total_price": "1700.00"
+    },
+    {
+      "name": "Стейк",
+      "quantity": "3",
+      "total_price": "7500.00"
+    },
+    {
+      "name": "Салат",
+      "quantity": "1",
+      "total_price": "1950.00"
+    },
+    {
+      "name": "Морепродукты",
+      "quantity": "2",
+      "total_price": "13000.00"
+    },
+    {
+      "name": "Паста",
+      "quantity": "3",
+      "total_price": "3750.00"
+    },
+    {
+      "name": "Суп",
+      "quantity": "2",
+      "total_price": "2200.00"
+    },
+    {
+      "name": "Десерт",
+      "quantity": "4",
+      "total_price": "3400.00"
+    },
+    {
+      "name": "Лимонад",
+      "quantity": "1",
+      "total_price": "1670.00"
+    },
+    {
+      "name": "Чай",
+      "quantity": "2",
+      "total_price": "660.00"
+    },
+    {
+      "name": "Кофе",
+      "quantity": "3",
+      "total_price": "1710.00"
+    },
+    {
+      "name": "Ассорти",
+      "quantity": "1",
+      "total_price": "2692.50"
+    },
+    {
+      "name": "Кофе",
+      "quantity": "1",
+      "total_price": "570.00"
+    },
+    {
+      "name": "Чай",
+      "quantity": "1",
+      "total_price": "330.00"
+    },
+    {
+      "name": "Десерт",
+      "quantity": "1",
+      "total_price": "770.00"
+    }
+  ],
+  "expected_total": "41902.50",
+  "currency": "RUB",
+  "expected_gross_total": "41902.50",
+  "expected_prepayment": "7000.00",
+  "expected_amount_due": "34902.50",
+  "expected_guest_subtotals": {
+    "1": "11150.00",
+    "2": "29082.50",
+    "3": "1670.00"
+  }
+}
