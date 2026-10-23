@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.utils.token import TokenValidationError
 
 from bot.config import load_bot_token
@@ -19,7 +20,7 @@ async def main() -> None:
     except TokenValidationError:
         raise SystemExit("Некорректный формат BOT_TOKEN. Проверьте токен от @BotFather.") from None
 
-    dispatcher = Dispatcher()
+    dispatcher = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
     dispatcher.include_router(router)
     # Long polling получает новые сообщения; aiogram закрывает сессию при остановке.
     await dispatcher.start_polling(bot)
