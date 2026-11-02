@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from bot.services import tesseract_receipt_recognition as local
 from bot.services.receipt_models import LowQualityReceipt, UnparsedReceipt, UnreadableReceipt
 from bot.services.receipt_recognition import recognize_receipt
+from bot.services.receipt_parser import parse_receipt_lines
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -129,8 +130,9 @@ def trace_pipeline(save_images: bool):
     Обёртки живут только в отдельном CLI-процессе, не в работающем боте.
     Сохраняется точное изображение, переданное выбранному вызову Tesseract.
     """
-    trace = {"candidate": None, "images": {}}
+    trace = {"candidate": None, "images": {}, "parser_diagnostics": None}
     original_extract, original_data = local.extract_text, local.pytesseract.image_to_data
+    original_parser = local.parse_receipt_lines
     variant_ids = {}
 
     def extract(image):
@@ -147,9 +149,19 @@ def trace_pipeline(save_images: bool):
                 trace["images"][name] = image.copy()
         return original_data(image, **kwargs)
 
+    def parse(lines):
+        try:
+            result = original_parser(lines)
+            trace["parser_diagnostics"] = result.parser_diagnostics
+            return result
+        except UnreadableReceipt as error:
+            trace["parser_diagnostics"] = getattr(error, "parser_diagnostics", None)
+            raise
+
     try:
         with patch.object(local, "extract_text", side_effect=extract), \
-                patch.object(local.pytesseract, "image_to_data", side_effect=image_to_data):
+                patch.object(local.pytesseract, "image_to_data", side_effect=image_to_data), \
+                patch.object(local, "parse_receipt_lines", side_effect=parse):
             yield trace
     finally:
         for image in trace["images"].values():
@@ -192,6 +204,9 @@ async def run_case(case: ExpectedReceipt, image: Path, artifacts: Path | None) -
             "preprocessing": candidate.preprocessing if candidate else None,
             "elapsed_seconds": round(elapsed, 3), "error": error_type,
             "items_total": str(result.items_total) if result is not None else None,
+            "prepayment_ocr": result.prepayment_ocr if result is not None else None,
+            "prepayment_status": ("suspect" if result.prepayment_suspect else "verified" if result.prepayment_verified
+                                  else "unverified" if result.prepayment is not None else "not_found") if result is not None else "not_found",
         }
         for name in ("gross_total", "prepayment", "amount_due"):
             actual = getattr(result, name) if result is not None else None
@@ -202,10 +217,14 @@ async def run_case(case: ExpectedReceipt, image: Path, artifacts: Path | None) -
         if case.expected_guest_subtotals is not None:
             row["guest_subtotals_correct"] = result is not None and ({key: Decimal(value) for key, value in row["guest_subtotals"].items()}
                                               == {key: Decimal(value) for key, value in case.expected_guest_subtotals.items()})
+        diagnostics = trace["parser_diagnostics"]
+        row["parser_diagnostics"] = diagnostics.model_dump() if diagnostics is not None else None
+        row["accepted_items_count"] = len(result.items) if result is not None else 0
         if artifacts is not None:
             directory = artifacts / case.name
             directory.mkdir(parents=True, exist_ok=True)
             (directory / "ocr.txt").write_text(candidate.text if candidate else "", encoding="utf-8")
+            (directory / "parser_lines.json").write_text(json.dumps(row["parser_diagnostics"], ensure_ascii=False, indent=2), encoding="utf-8")
             selected = trace["images"].get(candidate.preprocessing) if candidate else None
             if selected is not None:
                 selected.save(directory / "processed.png")
@@ -233,6 +252,9 @@ def print_case(row):
     print(f"\n{row['name']} ({row['file']}):")
     print(f"  lines: {row['lines']} | items: {row['found']}/{row['expected']} | missing: {row['missing']}")
     print(f"  false positives: {row['false_positives']}")
+    diagnostics = row.get("parser_diagnostics")
+    if diagnostics:
+        print(f"  OCR lines: {diagnostics['ocr_lines']} | accepted item lines: {diagnostics['accepted_item_lines']} | rejected candidate lines: {diagnostics['rejected_candidate_lines']} | ignored service lines: {diagnostics['ignored_service_lines']}")
     if "items_total" in row:
         print(f"  items total: {row['items_total']}")
     total_status = "OK" if row["total_correct"] else f"FAIL (expected {row['expected_total']}, got {row['actual_total']})"
@@ -262,6 +284,30 @@ async def benchmark(cases, artifacts):
     return {"receipts": rows, "overall": overall}
 
 
+def replay_raw_ocr(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8")
+    start = time.perf_counter()
+    try:
+        result = parse_receipt_lines(text.splitlines())
+    except UnreadableReceipt as error:
+        diagnostics = getattr(error, "parser_diagnostics", None)
+        return {"mode": "raw_ocr_replay", "status": "unparsed", "parser_diagnostics": diagnostics.model_dump() if diagnostics else None}
+    return {
+        "mode": "raw_ocr_replay", "status": "ok", "reference_available": False,
+        "accepted_items_count": len(result.items), "items_total": str(result.items_total),
+        "guest_subtotals": result.guest_subtotals, "guest_totals_sum": str(result.guest_subtotals_total),
+        "gross_total": result.gross_total, "prepayment": result.prepayment, "amount_due": result.amount_due,
+        "prepayment_ocr": result.prepayment_ocr,
+        "prepayment_status": "suspect" if result.prepayment_suspect else "verified" if result.prepayment_verified else "unverified" if result.prepayment is not None else "not_found",
+        "calculated_prepayment": str(result.calculated_prepayment) if result.calculated_prepayment is not None else None,
+        "comparison_total": str(result.comparison_total) if result.comparison_total is not None else None,
+        "currency": result.currency, "parser_diagnostics": result.parser_diagnostics.model_dump(),
+        "accepted_items": [item.model_dump() for item in result.items],
+        "parse_warnings": result.parse_warnings,
+        "elapsed_seconds": round(time.perf_counter() - start, 4),
+    }
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
@@ -269,8 +315,18 @@ def main(argv=None) -> int:
     parser.add_argument("--artifacts", nargs="?", type=Path, const=DEFAULT_ARTIFACTS,
                         help="Save raw OCR, selected processed image and report.json")
     parser.add_argument("--json", type=Path, help="Save a machine-readable report for before/after comparison")
+    parser.add_argument("--raw-ocr", type=Path, help="Replay existing OCR through parser only; no image OCR or item gold is claimed")
     args = parser.parse_args(argv)
     load_dotenv(ROOT / ".env", override=False)
+    if args.raw_ocr:
+        if args.case or args.artifacts:
+            parser.error("--raw-ocr uses --json for its report; do not combine with --case/--artifacts")
+        report = replay_raw_ocr(args.raw_ocr)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        if args.json:
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return 0
     try:
         cases = load_cases(args.fixtures)
         if args.case:

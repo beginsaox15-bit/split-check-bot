@@ -148,8 +148,8 @@ def _recognize_sync(image: bytes) -> RecognizedReceipt:
         raise LowQualityReceipt(best.text)
     try:
         result = parse_receipt_lines(best.text.splitlines())
-    except UnreadableReceipt:
-        raise UnparsedReceipt(best.text) from None
+    except UnreadableReceipt as error:
+        raise UnparsedReceipt(best.text, getattr(error, "parser_diagnostics", None)) from None
     return result.model_copy(update={"raw_text": best.text})
 
 

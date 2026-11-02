@@ -15,6 +15,24 @@ from bot.services.receipt_models import (
 
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_suspect_prepayment_display_and_confirmation(self) -> None:
+        from bot.services.receipt_parser import parse_receipt_lines
+        self.recognize.return_value = parse_receipt_lines([
+            "Гость 1", "Пицца 1 41902.50", "Полная сумма 41902.50",
+            "Предоплата 7009.00", "Итого к оплате 34902.50",
+        ])
+        await self.dispatch(self.callback("split_check"))
+        text = (await self.dispatch(self.photo()))[-1].text
+        self.assertIn("Предоплата прочитана как 7009 ₽", text)
+        self.assertIn("не используется в расчётах", text)
+        self.assertIn("Разница полной суммы и остатка: 7000 ₽", text)
+        self.assertNotIn("Предоплата: 7000", text)
+        await self.dispatch(self.callback("confirm_recognition"))
+        data = await self.context().get_data()
+        self.assertIsNone(data["prepayment"])
+        self.assertEqual(data["prepayment_ocr"], "7009")
+        self.assertTrue(data["prepayment_suspect"])
+
     async def test_guest_receipt_displays_and_preserves_payment_totals(self) -> None:
         from pathlib import Path
         from bot.services.receipt_parser import parse_receipt_lines

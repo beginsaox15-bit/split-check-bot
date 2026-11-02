@@ -93,9 +93,10 @@ class GuestReceiptTests(unittest.TestCase):
                                       "Итого к оплате Гость 1: 999.00", "Полная сумма 330.00"])
         self.assertTrue(result.parse_warnings)
 
-    def test_prepayment_plus_due_can_be_used_when_gross_not_printed(self):
+    def test_unverified_prepayment_not_used_to_invent_gross(self):
         result = parse_receipt_lines(["Гость 1", "Чай 1 330.00", "Предоплата 100", "К оплате 230"])
-        self.assertEqual(result.comparison_total, Decimal("330"))
+        self.assertIsNone(result.comparison_total)
+        self.assertFalse(result.prepayment_verified)
         self.assertFalse(result.totals_mismatch)
 
     def test_service_only_receipt_has_no_goods(self):

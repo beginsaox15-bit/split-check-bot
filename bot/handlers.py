@@ -172,6 +172,8 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
                              ("Итого к оплате", result.amount_due)):
             if value is not None:
                 text += f"\n{label}: {money(Decimal(value))} {currency}".rstrip()
+                if label == "Предоплата" and not result.prepayment_verified:
+                    text += " (не проверена по итогам)"
     elif result.receipt_total is not None:
         total = f"{money(Decimal(result.receipt_total))} {currency}".rstrip()
         text += f"\nИтого в чеке: {total}"
@@ -185,6 +187,10 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
         text += "\n⚠️ Сумма итогов гостей не совпадает с полной суммой чека."
     if result.payment_mismatch:
         text += "\n⚠️ Полная сумма минус предоплата не совпадает с суммой к оплате."
+    if result.prepayment_suspect:
+        text += f"\n⚠️ Предоплата прочитана как {money(Decimal(result.prepayment_ocr))} {currency}; требует проверки и не используется в расчётах."
+        if result.calculated_prepayment is not None:
+            text += f"\nРазница полной суммы и остатка: {money(result.calculated_prepayment)} {currency}. Это не подтверждённая предоплата."
     if result.skipped_lines:
         text += f"\n⚠️ Сомнительные строки пропущены: {result.skipped_lines}. Проверьте чек."
     for warning in result.parse_warnings:
@@ -301,6 +307,9 @@ async def confirm_recognition(callback: CallbackQuery, state: FSMContext) -> Non
             "currency": result.currency,
             "gross_total": result.gross_total,
             "prepayment": result.prepayment,
+            "prepayment_ocr": result.prepayment_ocr,
+            "prepayment_suspect": result.prepayment_suspect,
+            "prepayment_verified": result.prepayment_verified,
             "amount_due": result.amount_due,
             "guest_subtotals": result.guest_subtotals,
         })

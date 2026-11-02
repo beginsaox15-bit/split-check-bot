@@ -206,6 +206,8 @@ class TesseractBackendTests(unittest.IsolatedAsyncioTestCase):
             await local.recognize_receipt(image_bytes())
         self.assertEqual(caught.exception.raw_text, raw_text)
         self.assertNotIn(raw_text, str(caught.exception))
+        self.assertIsNotNone(caught.exception.parser_diagnostics)
+        self.assertEqual(caught.exception.parser_diagnostics.accepted_item_lines, 0)
 
     async def test_ocr_error_and_timeout_keep_traceback_in_developer_logs(self) -> None:
         for error in (pytesseract.TesseractError(1, "sensitive receipt data"),

@@ -1,9 +1,9 @@
 """Модели и ошибки локального OCR. Деньги сериализуются строками, считаются Decimal."""
 
 from decimal import Decimal, localcontext
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # Строки в JSON не допускают потери точности денежных значений через float.
@@ -35,6 +35,21 @@ class ReceiptItem(BaseModel):
         return value
 
 
+class ParserLineDecision(BaseModel):
+    line_number: int
+    category: Literal["accepted_item", "rejected_candidate", "ignored_service"]
+    reason: str
+    item_index: int | None = None
+
+
+class ParserDiagnostics(BaseModel):
+    ocr_lines: int = 0
+    accepted_item_lines: int = 0
+    rejected_candidate_lines: int = 0
+    ignored_service_lines: int = 0
+    lines: list[ParserLineDecision] = Field(default_factory=list)
+
+
 class RecognizedReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -49,13 +64,35 @@ class RecognizedReceipt(BaseModel):
     guest_subtotals: dict[str, Money] = Field(default_factory=dict)
     skipped_lines: int = Field(default=0, ge=0)
     parse_warnings: list[str] = Field(default_factory=list)
+    parser_diagnostics: ParserDiagnostics | None = None
+    prepayment_ocr: Money | None = None
+    prepayment_suspect: bool = False
+    prepayment_verified: bool = False
+
+    @model_validator(mode="after")
+    def check_prepayment(self):
+        self.prepayment_verified = False
+        if self.gross_total is not None and self.amount_due is not None and self.prepayment is not None:
+            if Decimal(self.gross_total) - Decimal(self.prepayment) != Decimal(self.amount_due):
+                self.prepayment_ocr = self.prepayment
+                self.prepayment = None
+                self.prepayment_suspect = True
+            else:
+                self.prepayment_verified = True
+        return self
+
+    @property
+    def calculated_prepayment(self) -> Decimal | None:
+        if self.gross_total is None or self.amount_due is None:
+            return None
+        value = Decimal(self.gross_total) - Decimal(self.amount_due)
+        return value if value >= 0 else None
 
     @property
     def comparison_total(self) -> Decimal | None:
         if self.gross_total is not None:
             return Decimal(self.gross_total)
-        if self.prepayment is not None and self.amount_due is not None:
-            return Decimal(self.prepayment) + Decimal(self.amount_due)
+        # Непроверенная OCR-предоплата не служит основанием для вычисления gross.
         return Decimal(self.receipt_total) if self.receipt_total is not None else None
 
     @property
@@ -70,6 +107,8 @@ class RecognizedReceipt(BaseModel):
 
     @property
     def payment_mismatch(self) -> bool:
+        if self.prepayment_suspect:
+            return True
         if self.gross_total is None or self.prepayment is None or self.amount_due is None:
             return False
         return Decimal(self.gross_total) - Decimal(self.prepayment) != Decimal(self.amount_due)
@@ -109,9 +148,10 @@ class TesseractLanguagesUnavailable(RecognitionUnavailable):
 class UnparsedReceipt(UnreadableReceipt):
     """Текст прочитан, но parser не смог выделить надёжные позиции."""
 
-    def __init__(self, raw_text: str):
+    def __init__(self, raw_text: str, parser_diagnostics: ParserDiagnostics | None = None):
         super().__init__("No reliable purchase lines found")
         self.raw_text = raw_text
+        self.parser_diagnostics = parser_diagnostics
 
 
 class LowQualityReceipt(UnreadableReceipt):

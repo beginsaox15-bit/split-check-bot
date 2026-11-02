@@ -5,7 +5,7 @@ from decimal import Decimal, localcontext
 
 from pydantic import ValidationError
 
-from bot.services.receipt_models import RecognizedReceipt, ReceiptItem, UnreadableReceipt
+from bot.services.receipt_models import ParserDiagnostics, ParserLineDecision, RecognizedReceipt, ReceiptItem, UnreadableReceipt
 
 
 AMOUNT = r"(?:[0-9]{1,3}(?: [0-9]{3})+|[0-9]+)(?:[.,][0-9]{1,2})?"
@@ -32,7 +32,7 @@ CURRENCY_SUFFIX = re.compile(r"\s*(?:₽|руб\.?|р\.|RUB|USD|EUR|€|\$)\s*$"
 GUEST_TOTAL = re.compile(r"^(?:и?того|игого|подытог)(?:\s+к\s+оплате)?\s+г?ость\s*[:№#]?\s*(?P<guest>\d{1,3})\b(?P<value>.*)$", re.I)
 GUEST = re.compile(r"^г?ость\s*[:№#]?\s*(?P<guest>\d{1,3})\b(?P<value>.*)$", re.I)
 SUMMARY_LABELS = (
-    ("gross_total", re.compile(r"^(?:полная\s+сумма|gross total)\b(?P<value>.*)$", re.I)),
+    ("gross_total", re.compile(r"^(?:полная\s+сум(?:ма|ми|и)|gross total)\b(?P<value>.*)$", re.I)),
     ("prepayment", re.compile(r"^(?:предоплата|аванс|prepayment)\b(?P<value>.*)$", re.I)),
     ("amount_due", re.compile(r"^(?:(?:и?того|игого)\s+к\s+оплате|к\s+оплате|amount due)\b(?P<value>.*)$", re.I)),
 )
@@ -40,8 +40,6 @@ RESTAURANT_SERVICE = re.compile(r"^(?:гость|ость|стол|cron|стоп
 THREE_COLUMNS = re.compile(rf"^(?P<name>.*?\S)\s+(?P<quantity>[0-9]+(?:[.,][0-9]{{1,6}})?)\s+(?P<total>{AMOUNT})$")
 RUBLE_MARKER = re.compile(r"₽|\b(?:руб|RUB)\b", re.I)
 RUSSIAN_FISCAL = re.compile(r"\b(?:ИНН|ККТ|ККМ|ФН|ФД|ФПД|ОФД|ФФД)\b", re.I)
-DOLLAR_MARKER = re.compile(r"\bUSD\b|\$\s*\d|\d\s*\$", re.I)
-EURO_MARKER = re.compile(r"\bEUR\b|€\s*\d|\d\s*€", re.I)
 
 
 def detect_currency(lines: list[str]) -> str:
@@ -50,17 +48,46 @@ def detect_currency(lines: list[str]) -> str:
     # результат не должен зависеть от порядка строк.
     if any(RUBLE_MARKER.search(line) or RUSSIAN_FISCAL.search(line) for line in normalized):
         return "RUB"
-    evidence = [line for line in normalized
-                if not re.search(r"^QR\b|://|www\.", line, re.I)]
-    for currency, marker in (("USD", DOLLAR_MARKER), ("EUR", EURO_MARKER)):
-        if any(marker.search(line) for line in evidence):
-            return currency
+    russian = (any(GUEST.match(line) or GUEST_TOTAL.match(line) for line in normalized)
+               or sum(len(re.findall(r"[А-Яа-яЁё]", line)) for line in normalized)
+               > sum(len(re.findall(r"[A-Za-z]", line)) for line in normalized))
+    # Уверенное обозначение: поле валюты либо цена в валидной строке товара/итога.
+    # Изолированный $ и символ в мусоре/служебных данных ничего не доказывают.
+    evidence = []
+    for line in normalized:
+        if re.search(r"^QR\b|://|www\.|^save\s*/", line, re.I):
+            continue
+        field = re.fullmatch(r"(?:валюта|currency)\s*[:=]\s*(USD|EUR|\$|€)", line, re.I)
+        if field:
+            evidence.append((3, "USD" if field[1].upper() in ("USD", "$") else "EUR"))
+            continue
+        match = re.fullmatch(rf"(?P<label>.*?)\s+(?P<amount>{AMOUNT})\s*(?P<currency>USD|EUR|\$|€)", line, re.I)
+        if match is None:
+            match = re.fullmatch(rf"(?P<label>.*?)\s+(?P<currency>USD|EUR|\$|€)\s*(?P<amount>{AMOUNT})", line, re.I)
+        if not match:
+            continue
+        label, marker = match["label"].strip(" :;=—"), match["currency"].upper()
+        total_line = bool(TOTAL.fullmatch(label) or any(
+            (m := pattern.match(label)) and not m["value"].strip(" :;=—") for _, pattern in SUMMARY_LABELS))
+        if not total_line and (SERVICE.match(label) or RESTAURANT_SERVICE.match(label) or not plausible_name(label)):
+            continue
+        if marker in ("USD", "$"):
+            if russian and (marker == "$" or not total_line):
+                continue
+            currency = "USD"
+        else:
+            currency = "EUR"
+        evidence.append((2 if total_line and marker in ("USD", "EUR") else 1 if total_line else 0, currency))
+    if evidence:
+        return max(evidence, key=lambda item: item[0])[1]
     # Существующий безопасный fallback для русскоязычных рублёвых чеков.
     return "RUB"
 
 
 def normalize(text: str) -> str:
-    return " ".join(text.replace("\u00a0", " ").replace("\u202f", " ").split())
+    text = " ".join(text.replace("\u00a0", " ").replace("\u202f", " ").split())
+    # Меняем только пробелы вокруг уже существующего десятичного разделителя.
+    return re.sub(r"(?<=\d)\s*([.,])\s*(?=\d{2}(?!\d))", r"\1", text)
 
 
 def decimal_value(text: str) -> Decimal:
@@ -105,7 +132,16 @@ def plausible_name(name: str) -> bool:
     # Не склеиваем обрывки разных алфавитов внутри слова и числовые колонки.
     if any(re.search(r"[A-Za-z]", word) and re.search(r"[А-Яа-яЁё]", word) for word in words):
         return False
-    return not re.search(r"\s\d+(?:[.,]\d+)?\s*$", name)
+    return "|" not in name and not re.search(r"\s\d+(?:[.,]\d+)?[^\w%]*$", name)
+
+
+def rejection_reason(line: str) -> str:
+    if "|" in line:
+        return "damaged_columns"
+    if any(re.search(r"[A-Za-z]", word) and re.search(r"[А-Яа-яЁё]", word)
+           for word in re.findall(r"\w+", line)):
+        return "mixed_script_name"
+    return "implausible_name_quantity_or_price"
 
 
 def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
@@ -116,6 +152,8 @@ def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
     guest_block_start = 0
     skipped = 0
     prepayment_seen = False
+    decisions = {}
+    pending_name_line = None
     currency = detect_currency(lines)
     restaurant = any(GUEST.match(normalize(line)) or GUEST_TOTAL.match(normalize(line)) for line in lines)
 
@@ -138,9 +176,17 @@ def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
         value = value.strip(" :;=—")
         return value if re.fullmatch(AMOUNT, value) else None
 
-    for raw in lines:
+    for line_number, raw in enumerate(lines, 1):
         line = CURRENCY_SUFFIX.sub("", normalize(raw)).strip()
+        if normalize(raw):
+            decisions[line_number] = ParserLineDecision(line_number=line_number, category="rejected_candidate", reason="unparsed_or_incomplete")
+
+        def decide(category, reason, item_index=None):
+            if line_number in decisions:
+                decisions[line_number] = ParserLineDecision(line_number=line_number, category=category, reason=reason, item_index=item_index)
+
         if not line:
+            decide("ignored_service", "currency_only")
             continue
         if pending_summary:
             kind, guest = pending_summary
@@ -148,6 +194,7 @@ def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
             value = summary_amount(line)
             if value is not None:
                 set_summary(kind, guest, value)
+                decide("ignored_service", "summary_value")
                 continue
             warn("Не все итоговые суммы удалось прочитать. Проверьте чек.")
         guest_total, guest_header = GUEST_TOTAL.match(line), GUEST.match(line)
@@ -161,6 +208,7 @@ def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
             current_guest = None
             guest_block_start = len(items)
         elif guest_header:
+            decide("ignored_service", "guest_header")
             current_guest = guest_header["guest"]
             guest_block_start = len(items)
             pending_name = None
@@ -179,6 +227,7 @@ def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
             else:
                 kind = None
         if kind is not None:
+            decide("ignored_service", "guest_subtotal" if kind == "guest" else kind)
             pending_name = None
             if kind == "prepayment":
                 prepayment_seen = True
@@ -191,12 +240,16 @@ def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
                 warn("Не все итоговые суммы удалось прочитать. Проверьте чек.")
             continue
         if (SERVICE.match(line) or RESTAURANT_SERVICE.match(line) or DATE_TIME.search(line)
-                or "://" in line or "www." in line.lower()):
+                or "://" in line or "www." in line.lower() or re.match(r"^save\s*/", line, re.I)
+                or re.search(r"\bкол[ .-]*во\b", line, re.I)):
+            decide("ignored_service", "service_date_or_url")
             pending_name = None
             continue
         item = None
+        used_pending = False
         match = MULTIPLIER.search(line)
         if match:
+            used_pending = not line[:match.start()].strip() and bool(pending_name)
             name = line[:match.start()].strip() or pending_name or ""
             quantity, unit = decimal_value(match["quantity"]), decimal_value(match["price"])
             with localcontext() as context:
@@ -219,9 +272,16 @@ def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
                         pending_name = None
                         continue
                     name = line[:tail.start()].strip(" =—:") or pending_name or ""
+                    used_pending = not line[:tail.start()].strip(" =—:") and bool(pending_name)
                     total = decimal_value(tail["amount"])
                     item = make_item(name, Decimal(1), None, total)
+        if item and restaurant and Decimal(item.quantity) > 1000:
+            item = None
+            decide("rejected_candidate", "implausible_quantity")
         if item:
+            decide("accepted_item", "parsed_item", len(items))
+            if used_pending and pending_name_line in decisions:
+                decisions[pending_name_line] = ParserLineDecision(line_number=pending_name_line, category="accepted_item", reason="multiline_item_name", item_index=len(items))
             item.guest_id = current_guest
             items.append(item)
             pending_name = None
@@ -230,13 +290,24 @@ def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
             if pending_name is not None:
                 skipped += 1
             pending_name = line
+            pending_name_line = line_number
         else:
             skipped += 1
             pending_name = None
+            if decisions[line_number].reason != "implausible_quantity":
+                decide("rejected_candidate", rejection_reason(line))
     if pending_summary:
         warn("Не все итоговые суммы удалось прочитать. Проверьте чек.")
+    diagnostics = ParserDiagnostics(
+        ocr_lines=len(decisions), lines=list(decisions.values()),
+        accepted_item_lines=sum(row.category == "accepted_item" for row in decisions.values()),
+        rejected_candidate_lines=sum(row.category == "rejected_candidate" for row in decisions.values()),
+        ignored_service_lines=sum(row.category == "ignored_service" for row in decisions.values()),
+    )
     if not items or len(items) > 200:
-        raise UnreadableReceipt("No reliable purchase lines found")
+        error = UnreadableReceipt("No reliable purchase lines found")
+        error.parser_diagnostics = diagnostics
+        raise error
     receipt_total = totals.get("gross_total")
     if receipt_total is None and not prepayment_seen:
         receipt_total = totals.get("receipt_total", totals.get("amount_due"))
@@ -244,5 +315,5 @@ def parse_receipt_lines(lines: list[str]) -> RecognizedReceipt:
         readable=True, items=items, receipt_total=receipt_total, currency=currency,
         gross_total=totals.get("gross_total"), prepayment=totals.get("prepayment"),
         amount_due=totals.get("amount_due"), guest_subtotals=guest_subtotals,
-        skipped_lines=skipped, parse_warnings=warnings,
+        skipped_lines=skipped, parse_warnings=warnings, parser_diagnostics=diagnostics,
     )
