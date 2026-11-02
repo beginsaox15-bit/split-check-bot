@@ -26,7 +26,7 @@ def rectify_receipt(gray: np.ndarray) -> tuple[np.ndarray, bool]:
         contours.extend(cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0])
     area = small.size
     for contour in sorted(contours, key=cv2.contourArea, reverse=True):
-        if not .20 * area <= cv2.contourArea(contour) <= .97 * area:
+        if not .08 * area <= cv2.contourArea(contour) <= .97 * area:
             continue
         polygon = cv2.approxPolyDP(contour, .025 * cv2.arcLength(contour, True), True)
         if len(polygon) != 4 or not cv2.isContourConvex(polygon):
@@ -50,7 +50,11 @@ def rectify_receipt(gray: np.ndarray) -> tuple[np.ndarray, bool]:
         tl, tr, br, bl = corners
         width = round(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl)))
         height = round(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
-        if min(width, height) < 80 or max(width, height) / min(width, height) > 12:
+        aspect = max(width, height) / max(1, min(width, height))
+        if min(width, height) < 80 or aspect > 30:
+            continue
+        # Узкая длинная бумага может занимать меньше 20% площади фотографии.
+        if cv2.contourArea(contour) < .20 * area and aspect < 2.5:
             continue
         destination = np.float32([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]])
         transform = cv2.getPerspectiveTransform(corners.astype(np.float32), destination)
@@ -85,7 +89,26 @@ def deskew(gray: np.ndarray) -> tuple[np.ndarray, float]:
     return cv2.warpAffine(gray, matrix, (out_w, out_h), borderValue=255), float(angle)
 
 
-def prepare_image(image: bytes) -> Image.Image:
+def enhance_image(image: Image.Image, *, max_scale: float | None = None) -> Image.Image:
+    """Та же обработка тона для полного кадра и каждого исходного сегмента."""
+    gray = np.array(image)
+    scale = min(3.0 if max(gray.shape) < 1200 else 2.0, MAX_SIDE / max(gray.shape))
+    if max_scale is not None:
+        scale = min(scale, max_scale)
+    gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    background = cv2.GaussianBlur(gray, (0, 0), 25)
+    normalized = cv2.divide(gray, np.maximum(background, 1), scale=245)
+    contrast = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8)).apply(normalized)
+    denoised = cv2.bilateralFilter(contrast, 3, 15, 15)
+    sharpened = cv2.addWeighted(denoised, 1.25, cv2.GaussianBlur(denoised, (0, 0), 1), -.25, 0)
+    prepared = Image.fromarray(sharpened)
+    prepared.info["preprocessing"] = image.info.get("preprocessing", "grayscale") + (
+        f",scale={scale:.2f},shadow_normalization,clahe,bilateral,light_sharpen"
+    )
+    return prepared
+
+
+def prepare_image(image: bytes, *, geometry_only: bool = False) -> Image.Image:
     try:
         with Image.open(BytesIO(image)) as source:
             if source.width * source.height > 25_000_000:
@@ -95,20 +118,14 @@ def prepare_image(image: bytes) -> Image.Image:
                     gray = np.array(converted)
         gray, rectified = rectify_receipt(gray)
         gray, angle = deskew(gray)
-        scale = min(3.0 if max(gray.shape) < 1200 else 2.0, MAX_SIDE / max(gray.shape))
-        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        # Убираем тени без эрозии тонких штрихов.
-        background = cv2.GaussianBlur(gray, (0, 0), 25)
-        normalized = cv2.divide(gray, np.maximum(background, 1), scale=245)
-        contrast = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8)).apply(normalized)
-        denoised = cv2.bilateralFilter(contrast, 3, 15, 15)
-        sharpened = cv2.addWeighted(denoised, 1.25, cv2.GaussianBlur(denoised, (0, 0), 1), -.25, 0)
-        prepared = Image.fromarray(sharpened)
+        prepared = Image.fromarray(gray)
         prepared.info["preprocessing"] = (
-            f"exif,grayscale,crop_perspective={rectified},deskew={angle:.1f},"
-            f"scale={scale:.2f},shadow_normalization,clahe,bilateral,light_sharpen"
+            f"exif,grayscale,crop_perspective={rectified},deskew={angle:.1f}"
         )
-        return prepared
+        if geometry_only:
+            return prepared
+        with prepared:
+            return enhance_image(prepared)
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError, cv2.error) as error:
         raise UnreadableReceipt("Cannot decode image") from error
 

@@ -22,6 +22,21 @@ def item(name, price="850.00", quantity="1"):
 
 
 class BenchmarkMetricTests(unittest.TestCase):
+    def test_trace_keeps_segment_images_separate(self):
+        def extract(data):
+            for index, variant in enumerate(("grayscale", "adaptive")):
+                with Image.new("L", (2, 2), index * 255) as image:
+                    image.info.update(ocr_scope=f"segment_{index}", ocr_preprocessing=variant)
+                    local.pytesseract.image_to_data(image, config="--psm 6")
+            return SimpleNamespace(preprocessing="mixed")
+
+        with patch.object(local, "extract_text", side_effect=extract), \
+                patch.object(local.pytesseract, "image_to_data", return_value={}):
+            with trace_pipeline(True) as trace:
+                local.extract_text(b"test")
+                self.assertEqual(trace["images"]["segment_0/grayscale"].getpixel((0, 0)), 0)
+                self.assertEqual(trace["images"]["segment_1/adaptive"].getpixel((0, 0)), 255)
+
     def test_failed_pipeline_does_not_claim_correct_absent_total_or_currency(self):
         case = ExpectedReceipt(name="case", image="case.png", expected_items=[item("Бургер")],
                                expected_total=None, currency=None)

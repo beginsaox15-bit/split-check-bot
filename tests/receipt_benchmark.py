@@ -124,7 +124,7 @@ def load_cases(fixtures: Path) -> list[tuple[ExpectedReceipt, Path]]:
 
 
 @contextmanager
-def trace_pipeline(save_images: bool):
+def trace_pipeline(save_images: bool, strategy="auto"):
     """Собирает диагностику, всегда вызывая настоящие функции текущего pipeline.
 
     Обёртки живут только в отдельном CLI-процессе, не в работающем боте.
@@ -136,15 +136,19 @@ def trace_pipeline(save_images: bool):
     variant_ids = {}
 
     def extract(image):
-        candidate = original_extract(image)
+        candidate = original_extract(image) if strategy == "auto" else original_extract(image, strategy=strategy)
         trace["candidate"] = candidate
         return candidate
 
     def image_to_data(image, **kwargs):
         if save_images:
-            if id(image) not in variant_ids:
-                variant_ids[id(image)] = "grayscale" if not variant_ids else "adaptive"
-            name = variant_ids[id(image)]
+            scope = image.info.get("ocr_scope", "full")
+            variant = image.info.get("ocr_preprocessing")
+            if variant is None:
+                if id(image) not in variant_ids:
+                    variant_ids[id(image)] = "grayscale" if not variant_ids else "adaptive"
+                variant = variant_ids[id(image)]
+            name = variant if scope == "full" else scope + "/" + variant
             if name not in trace["images"]:
                 trace["images"][name] = image.copy()
         return original_data(image, **kwargs)
@@ -174,10 +178,10 @@ def equal_total(expected: str | None, actual: str | None) -> bool:
     return Decimal(expected) == Decimal(actual)
 
 
-async def run_case(case: ExpectedReceipt, image: Path, artifacts: Path | None) -> dict:
+async def run_case(case: ExpectedReceipt, image: Path, artifacts: Path | None, strategy="auto") -> dict:
     start = time.perf_counter()
     result, status, error_type = None, "ok", None
-    with trace_pipeline(artifacts is not None) as trace:
+    with trace_pipeline(artifacts is not None, strategy) as trace:
         try:
             result = await recognize_receipt(image.read_bytes())
         except LowQualityReceipt:
@@ -200,6 +204,11 @@ async def run_case(case: ExpectedReceipt, image: Path, artifacts: Path | None) -
             "expected_total": case.expected_total, "actual_total": actual_total,
             "currency_correct": result is not None and case.currency == actual_currency,
             "expected_currency": case.currency, "actual_currency": actual_currency,
+            "strategy": candidate.strategy if candidate else None,
+            "segment_count": candidate.segment_count if candidate else 0,
+            "overlap": candidate.overlap if candidate else 0,
+            "psms": candidate.psms if candidate else [],
+            "candidate_item_lines": candidate.quality.get("candidate_item_lines", 0) if candidate else 0,
             "psm": candidate.psm if candidate else None,
             "preprocessing": candidate.preprocessing if candidate else None,
             "elapsed_seconds": round(elapsed, 3), "error": error_type,
@@ -220,12 +229,47 @@ async def run_case(case: ExpectedReceipt, image: Path, artifacts: Path | None) -
         diagnostics = trace["parser_diagnostics"]
         row["parser_diagnostics"] = diagnostics.model_dump() if diagnostics is not None else None
         row["accepted_items_count"] = len(result.items) if result is not None else 0
+        row["strategies"] = []
+        for alternative in candidate.alternatives if candidate else []:
+            parsed = None
+            rejected = None
+            try:
+                if alternative.reliable:
+                    parsed = parse_receipt_lines(alternative.text.splitlines())
+                    rejected = parsed.parser_diagnostics.rejected_candidate_lines
+            except UnreadableReceipt as error:
+                diag = getattr(error, "parser_diagnostics", None)
+                rejected = diag.rejected_candidate_lines if diag else None
+            metrics_alt = match_items(case.expected_items, parsed.items if parsed else [])
+            row["strategies"].append({
+                "strategy": alternative.strategy, "segments": alternative.segment_count, "overlap": alternative.overlap,
+                "complete": alternative.complete,
+                "status": "ocr_unavailable" if not alternative.complete else "low_quality" if not alternative.reliable else "parsed" if parsed else "unparsed",
+                "psms": alternative.psms, "lines": alternative.lines, "quality": alternative.quality,
+                "accepted_items": len(parsed.items) if parsed else 0, "rejected_candidates": rejected,
+                "found": metrics_alt["found"], "false_positives": metrics_alt["false_positives"],
+                "item_sum": str(parsed.items_total) if parsed else None, "time": round(alternative.elapsed_seconds, 3),
+            })
         if artifacts is not None:
             directory = artifacts / case.name
             directory.mkdir(parents=True, exist_ok=True)
+            segment_dir = directory / "processed_segments"
+            if segment_dir.exists():
+                for old in segment_dir.glob("[0-9][0-9].png"):
+                    old.unlink()
+                if (segment_dir / "segments.json").exists():
+                    (segment_dir / "segments.json").unlink()
             (directory / "ocr.txt").write_text(candidate.text if candidate else "", encoding="utf-8")
             (directory / "parser_lines.json").write_text(json.dumps(row["parser_diagnostics"], ensure_ascii=False, indent=2), encoding="utf-8")
-            selected = trace["images"].get(candidate.preprocessing) if candidate else None
+            selected = trace["images"].get(candidate.preprocessing) if candidate and candidate.strategy == "full" else None
+            if candidate and candidate.strategy == "segmented":
+                segment_dir = directory / "processed_segments"
+                segment_dir.mkdir(exist_ok=True)
+                for detail in candidate.segment_details:
+                    selected_segment = trace["images"].get(f"segment_{detail['index']}/{detail['preprocessing']}")
+                    if selected_segment is not None:
+                        selected_segment.save(segment_dir / f"{detail['index']:02d}.png")
+                (segment_dir / "segments.json").write_text(json.dumps(candidate.segment_details, indent=2))
             if selected is not None:
                 selected.save(directory / "processed.png")
             elif (directory / "processed.png").exists():
@@ -264,15 +308,19 @@ def print_case(row):
     for name in ("gross_total", "prepayment", "amount_due", "guest_subtotals"):
         if name + "_correct" in row:
             print(f"  {name}: {row[name]} {'OK' if row[name + '_correct'] else 'FAIL'}")
+    if "strategy" in row:
+        print(f"  strategy: {row['strategy']} | segments: {row['segment_count']} | overlap: {row['overlap']:.0%} | PSMs: {row['psms']} | candidate item lines: {row['candidate_item_lines']}")
+    for alternative in row.get("strategies", []):
+        print(f"  {alternative['strategy']}: accepted {alternative['accepted_items']}, rejected {alternative['rejected_candidates']}, false positives {alternative['false_positives']}, items {alternative['found']}/{row['expected']}, sum {alternative['item_sum']}, time {alternative['time']:.2f}s")
     if row["error"]:
         print(f"  error: {row['error']}")
 
 
-async def benchmark(cases, artifacts):
+async def benchmark(cases, artifacts, strategy="auto"):
     print("Receipt benchmark", flush=True)
     rows = []
     for case, image in cases:
-        row = await run_case(case, image, artifacts)
+        row = await run_case(case, image, artifacts, strategy)
         rows.append(row)
         print_case(row)
         sys.stdout.flush()
@@ -316,6 +364,8 @@ def main(argv=None) -> int:
                         help="Save raw OCR, selected processed image and report.json")
     parser.add_argument("--json", type=Path, help="Save a machine-readable report for before/after comparison")
     parser.add_argument("--raw-ocr", type=Path, help="Replay existing OCR through parser only; no image OCR or item gold is claimed")
+    parser.add_argument("--strategy", choices=("auto", "full", "segmented", "compare"), default="auto",
+                        help="Force a strategy or compare both even for a shorter fixture")
     args = parser.parse_args(argv)
     load_dotenv(ROOT / ".env", override=False)
     if args.raw_ocr:
@@ -336,7 +386,7 @@ def main(argv=None) -> int:
             cases = [(case, image) for case, image in cases if case.name in args.case]
     except ValueError as error:
         parser.error(str(error))
-    report = asyncio.run(benchmark(cases, args.artifacts))
+    report = asyncio.run(benchmark(cases, args.artifacts, args.strategy))
     outputs = [args.json] if args.json else []
     if args.artifacts is not None:
         outputs.append(args.artifacts / "report.json")

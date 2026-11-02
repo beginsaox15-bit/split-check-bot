@@ -1,0 +1,773 @@
+{
+  "name": "long_restaurant_dense",
+  "image": "long_restaurant_dense.png",
+  "tags": [
+    "long",
+    "restaurant",
+    "guests",
+    "duplicates",
+    "small_text"
+  ],
+  "expected_items": [
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "275.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "425.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "290.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "372.50"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "167.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "167.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "167.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "167.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "167.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "167.00"
+    },
+    {
+      "name": "Пастрами сэндвич",
+      "quantity": "1",
+      "total_price": "167.00"
+    },
+    {
+      "name": "Лимонад домашний",
+      "quantity": "1",
+      "total_price": "167.00"
+    },
+    {
+      "name": "Тартар из говядины",
+      "quantity": "1",
+      "total_price": "167.00"
+    },
+    {
+      "name": "Сырная тарелка",
+      "quantity": "1",
+      "total_price": "167.00"
+    }
+  ],
+  "expected_total": "41902.50",
+  "currency": "RUB",
+  "expected_gross_total": "41902.50",
+  "expected_prepayment": "7000.00",
+  "expected_amount_due": "34902.50",
+  "expected_guest_subtotals": {
+    "1": "11150.00",
+    "2": "29082.50",
+    "3": "1670.00"
+  }
+}
