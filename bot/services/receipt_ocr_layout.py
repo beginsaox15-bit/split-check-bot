@@ -24,6 +24,8 @@ class OCRLine:
     good_chars: int
     segment: int = 0
     margin: float = 0
+    raw_confidence: float | None = None
+    numeric_confidence: float | None = None
 
 
 def is_long_receipt(size: tuple[int, int]) -> bool:

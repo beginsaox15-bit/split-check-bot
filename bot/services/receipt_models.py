@@ -19,6 +19,9 @@ class ReceiptItem(BaseModel):
     unit_price: Money | None
     total_price: Money
     guest_id: str | None = None
+    suspicious: bool = False
+    suspicion_reasons: list[str] = Field(default_factory=list)
+    was_reread: bool = False
 
     @field_validator("name")
     @classmethod
@@ -50,6 +53,18 @@ class ParserDiagnostics(BaseModel):
     lines: list[ParserLineDecision] = Field(default_factory=list)
 
 
+class LineReviewDiagnostics(BaseModel):
+    suspicious_items: int = 0
+    successfully_reread_items: int = 0
+    unresolved_suspicious_items: int = 0
+    removed_service_items: int = 0
+    original_item_sum: str
+    corrected_item_sum: str
+    extra_seconds: float = 0
+    # Только локальные диагностические данные; не выводятся в Telegram.
+    lines: list[dict] = Field(default_factory=list)
+
+
 class RecognizedReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -68,6 +83,20 @@ class RecognizedReceipt(BaseModel):
     prepayment_ocr: Money | None = None
     prepayment_suspect: bool = False
     prepayment_verified: bool = False
+    line_review: LineReviewDiagnostics | None = None
+    # Вычисляется только при уверенно прочитанных предоплате и остатке.
+    # Не заменяет ни одно поле, прочитанное с чека.
+    derived_gross_total: Money | None = None
+
+    @property
+    def diagnostic_gross_total(self) -> Decimal | None:
+        return self.comparison_total if self.comparison_total is not None else (
+            Decimal(self.derived_gross_total) if self.derived_gross_total is not None else None)
+
+    @property
+    def missing_difference(self) -> Decimal | None:
+        total = self.diagnostic_gross_total
+        return total - self.items_total if total is not None else None
 
     @model_validator(mode="after")
     def check_prepayment(self):

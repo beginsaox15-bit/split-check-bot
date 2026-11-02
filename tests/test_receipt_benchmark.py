@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -22,6 +23,26 @@ def item(name, price="850.00", quantity="1"):
 
 
 class BenchmarkMetricTests(unittest.TestCase):
+    def test_before_after_review_counts_removed_header_as_false_positive(self):
+        from tests.test_receipt_line_review import line
+        candidate = local.make_candidate([
+            line("Зап: Зап Cron 18"), line("Гость 1"), line("Кофе 1 100.00"),
+            line("Чай 1 200.00"), line("Суп 1 300.00"), line("Полная сумма 600.00"),
+        ], "grayscale", 6)
+        case = ExpectedReceipt(name="review", image="review.png", currency="RUB", expected_total="600",
+                               expected_items=[item("Кофе", "100"), item("Чай", "200"), item("Суп", "300")])
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "review.png"
+            image.write_bytes(b"primary OCR is mocked; service removal needs no decoding")
+            with patch.object(local, "extract_text", return_value=candidate):
+                row = asyncio.run(run_case(case, image, None))
+        self.assertEqual(row["before_targeted_review"]["accepted_items"], 4)
+        self.assertEqual(row["before_targeted_review"]["false_positives"], 1)
+        self.assertEqual(row["after_targeted_review"]["accepted_items"], 3)
+        self.assertEqual(row["after_targeted_review"]["false_positives"], 0)
+        self.assertEqual(Decimal(row["difference_to_gross"]), 0)
+        self.assertEqual(row["line_review"]["removed_service_items"], 1)
+
     def test_trace_keeps_segment_images_separate(self):
         def extract(data):
             for index, variant in enumerate(("grayscale", "adaptive")):

@@ -130,7 +130,7 @@ def trace_pipeline(save_images: bool, strategy="auto"):
     Обёртки живут только в отдельном CLI-процессе, не в работающем боте.
     Сохраняется точное изображение, переданное выбранному вызову Tesseract.
     """
-    trace = {"candidate": None, "images": {}, "parser_diagnostics": None}
+    trace = {"candidate": None, "images": {}, "parser_diagnostics": None, "original_receipt": None}
     original_extract, original_data = local.extract_text, local.pytesseract.image_to_data
     original_parser = local.parse_receipt_lines
     variant_ids = {}
@@ -157,6 +157,7 @@ def trace_pipeline(save_images: bool, strategy="auto"):
         try:
             result = original_parser(lines)
             trace["parser_diagnostics"] = result.parser_diagnostics
+            trace["original_receipt"] = result.model_copy(deep=True)
             return result
         except UnreadableReceipt as error:
             trace["parser_diagnostics"] = getattr(error, "parser_diagnostics", None)
@@ -226,9 +227,30 @@ async def run_case(case: ExpectedReceipt, image: Path, artifacts: Path | None, s
         if case.expected_guest_subtotals is not None:
             row["guest_subtotals_correct"] = result is not None and ({key: Decimal(value) for key, value in row["guest_subtotals"].items()}
                                               == {key: Decimal(value) for key, value in case.expected_guest_subtotals.items()})
-        diagnostics = trace["parser_diagnostics"]
+        diagnostics = result.parser_diagnostics if result is not None else trace["parser_diagnostics"]
         row["parser_diagnostics"] = diagnostics.model_dump() if diagnostics is not None else None
         row["accepted_items_count"] = len(result.items) if result is not None else 0
+        row["line_review"] = result.line_review.model_dump() if result is not None and result.line_review else None
+        row["derived_gross_total"] = result.derived_gross_total if result is not None else None
+        row["difference_to_gross"] = str(result.missing_difference) if result is not None and result.missing_difference is not None else None
+        row["difference_reference"] = ("gross_ocr" if result.comparison_total is not None else "derived_gross") if result is not None and result.diagnostic_gross_total is not None else None
+        original = trace["original_receipt"]
+        if original is not None and result is not None:
+            before_metrics = match_items(case.expected_items, original.items)
+            reference = result.diagnostic_gross_total
+            row["before_targeted_review"] = {
+                "accepted_items": len(original.items), "suspicious_items": row["line_review"]["suspicious_items"] if row["line_review"] else 0,
+                "item_sum": str(original.items_total), "false_positives": before_metrics["false_positives"],
+                "found": before_metrics["found"], "rejected_candidates": original.parser_diagnostics.rejected_candidate_lines,
+                "difference_to_gross": str(reference - original.items_total) if reference is not None else None,
+                "processing_seconds": round(elapsed - result.line_review.extra_seconds, 3) if result.line_review else round(elapsed, 3),
+            }
+            row["after_targeted_review"] = {
+                "accepted_items": len(result.items), "suspicious_items": sum(item.suspicious for item in result.items),
+                "item_sum": str(result.items_total), "false_positives": metrics["false_positives"], "found": metrics["found"],
+                "rejected_candidates": diagnostics.rejected_candidate_lines,
+                "difference_to_gross": row["difference_to_gross"], "processing_seconds": round(elapsed, 3),
+            }
         row["strategies"] = []
         for alternative in candidate.alternatives if candidate else []:
             parsed = None
@@ -261,6 +283,15 @@ async def run_case(case: ExpectedReceipt, image: Path, artifacts: Path | None, s
                     (segment_dir / "segments.json").unlink()
             (directory / "ocr.txt").write_text(candidate.text if candidate else "", encoding="utf-8")
             (directory / "parser_lines.json").write_text(json.dumps(row["parser_diagnostics"], ensure_ascii=False, indent=2), encoding="utf-8")
+            (directory / "line_review.json").write_text(json.dumps(row["line_review"], ensure_ascii=False, indent=2), encoding="utf-8")
+            reread_dir = directory / "reread"
+            if reread_dir.exists():
+                for old in reread_dir.glob("*.png"):
+                    old.unlink()
+            for name, crop in trace["images"].items():
+                if name.startswith("reread_"):
+                    reread_dir.mkdir(exist_ok=True)
+                    crop.save(reread_dir / (name.replace("/", "_") + ".png"))
             selected = trace["images"].get(candidate.preprocessing) if candidate and candidate.strategy == "full" else None
             if candidate and candidate.strategy == "segmented":
                 segment_dir = directory / "processed_segments"
@@ -301,6 +332,16 @@ def print_case(row):
         print(f"  OCR lines: {diagnostics['ocr_lines']} | accepted item lines: {diagnostics['accepted_item_lines']} | rejected candidate lines: {diagnostics['rejected_candidate_lines']} | ignored service lines: {diagnostics['ignored_service_lines']}")
     if "items_total" in row:
         print(f"  items total: {row['items_total']}")
+    review = row.get("line_review")
+    if review:
+        print(f"  targeted review: suspicious {review['suspicious_items']} | re-read {review['successfully_reread_items']} | unresolved {review['unresolved_suspicious_items']} | removed service {review['removed_service_items']} | extra {review['extra_seconds']:.2f}s")
+        print(f"  original sum: {review['original_item_sum']} | corrected sum: {review['corrected_item_sum']} | difference to {row['difference_reference']}: {row['difference_to_gross']}")
+        if row.get("derived_gross_total") is not None:
+            print(f"  derived gross (calculated, not OCR): {row['derived_gross_total']}")
+        for stage in ("before_targeted_review", "after_targeted_review"):
+            if stage in row:
+                m = row[stage]
+                print(f"  {stage}: accepted {m['accepted_items']} | suspicious {m['suspicious_items']} | sum {m['item_sum']} | difference {m['difference_to_gross']} | false positives {m['false_positives']} | time {m['processing_seconds']:.2f}s")
     total_status = "OK" if row["total_correct"] else f"FAIL (expected {row['expected_total']}, got {row['actual_total']})"
     currency_status = "OK" if row["currency_correct"] else f"FAIL (expected {row['expected_currency']})"
     print(f"  total: {total_status} | currency: {row['actual_currency'] or '-'} {currency_status}")

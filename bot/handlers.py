@@ -163,6 +163,7 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
         + (f" (гость {item.guest_id})" if item.guest_id else "")
         + (f" × {money(Decimal(item.quantity))}" if Decimal(item.quantity) != 1 else "")
         + f" — {money(Decimal(item.total_price))} {currency}".rstrip()
+        + (" ⚠️ проверьте" if item.suspicious else "")
         for index, item in enumerate(result.items, 1)
     ]
     text = "Я распознал чек 🧾\n\n" + "\n".join(lines)
@@ -179,6 +180,10 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
         text += f"\nИтого в чеке: {total}"
     if result.currency is None:
         text += "\nВалюта не определена."
+    if result.gross_total is None and result.derived_gross_total is not None:
+        text += f"\nПолная сумма (вычислена из предоплаты и остатка): {money(Decimal(result.derived_gross_total))} {currency}"
+        if result.missing_difference:
+            text += f"\nРазница с суммой найденных позиций: {money(result.missing_difference)} {currency}. Проверьте полноту чека."
     if result.totals_mismatch:
         text += "\n\n⚠️ OCR мог распознать чек неточно. Сумма позиций не совпадает с итогом чека."
     if result.guest_subtotals:
@@ -302,7 +307,7 @@ async def confirm_recognition(callback: CallbackQuery, state: FSMContext) -> Non
     if isinstance(callback.message, Message):
         result = RecognizedReceipt.model_validate(data["recognition"])
         await state.set_data({
-            "items": [item.model_dump(mode="json", exclude={"guest_id"} if item.guest_id is None else set()) for item in result.items],
+            "items": [item.model_dump(mode="json", exclude_defaults=True) for item in result.items],
             "receipt_total": result.receipt_total,
             "currency": result.currency,
             "gross_total": result.gross_total,
@@ -312,6 +317,7 @@ async def confirm_recognition(callback: CallbackQuery, state: FSMContext) -> Non
             "prepayment_verified": result.prepayment_verified,
             "amount_due": result.amount_due,
             "guest_subtotals": result.guest_subtotals,
+            "derived_gross_total": result.derived_gross_total,
         })
         await state.set_state(ReceiptInput.confirmed)
         await callback.message.answer("Чек подтверждён ✅", reply_markup=START_MENU)

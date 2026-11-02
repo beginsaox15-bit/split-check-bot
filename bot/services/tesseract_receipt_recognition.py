@@ -47,6 +47,9 @@ class OCRCandidate:
     segment_details: list[dict] = field(default_factory=list)
     alternatives: list = field(default_factory=list)
     complete: bool = True
+    orientation_rotation: int = 0
+    geometry_size: tuple[int, int] | None = None
+    coordinate_scale: float = 1
 
 
 def word_rows(data: dict, psm: int) -> list[list[int]]:
@@ -82,18 +85,23 @@ def make_candidate(lines, preprocessing, psm):
 def candidate_from_data(data: dict, preprocessing: str, psm: int) -> OCRCandidate:
     lines = []
     for row_number, row in enumerate(word_rows(data, psm)):
-        tokens, good, chars = [], [], 0
+        tokens, good, chars, confidences, numeric = [], [], 0, [], []
         for i in row:
             word = data["text"][i].strip()
             tokens.append(word)
             confidence = float(data["conf"][i])
+            confidences.append(max(0, confidence))
+            if re.search(r"\d", word):
+                numeric.append(max(0, confidence))
             meaningful = re.findall(r"[A-Za-zА-Яа-яЁё0-9]", word)
             if len(meaningful) >= 2 and len(meaningful) / max(1, len(word)) >= .5 and confidence >= 45:
                 good.append(confidence)
                 chars += min(len(meaningful), 24)
         top = min(data["top"][i] for i in row) if "top" in data else row_number * 30
         bottom = max(data["top"][i] + data["height"][i] for i in row) if "height" in data else top + 20
-        lines.append(OCRLine(" ".join(tokens), top, bottom, sum(good) / max(1, len(good)), len(good), len(tokens), chars))
+        lines.append(OCRLine(" ".join(tokens), top, bottom, sum(good) / max(1, len(good)), len(good), len(tokens), chars,
+                             raw_confidence=sum(confidences) / len(confidences),
+                             numeric_confidence=min(numeric) if numeric else None))
     return make_candidate(lines, preprocessing, psm)
 
 
@@ -198,11 +206,18 @@ def extract_text(image: bytes, *, strategy="auto") -> OCRCandidate:
                 full = replace(make_candidate([], "grayscale", 6), complete=False)
             full.elapsed_seconds = time.monotonic() - t
             rotation = oriented.info.get("orientation_rotation", 0)
+            oriented_height = oriented.height
         segmented = None
         with geometry.rotate(-rotation, expand=True, fillcolor=255) as upright:
+            full.geometry_size = upright.size
+            full.coordinate_scale = oriented_height / upright.height
+            full.orientation_rotation = rotation
             if strategy in ("segmented", "compare") or (strategy == "auto" and is_long_receipt(upright.size)):
                 modes = tuple(dict.fromkeys((full.psm, *PSM_MODES)))
                 segmented = recognize_segments(upright, time.monotonic() + SEGMENT_BUDGET_SECONDS, modes)
+                if segmented is not None:
+                    segmented.geometry_size = upright.size
+                    segmented.orientation_rotation = rotation
         selected = segmented if strategy == "segmented" and segmented is not None else choose_strategy(full, segmented)
         if not selected.complete:
             raise RecognitionUnavailable("Neither OCR strategy completed")
@@ -227,6 +242,10 @@ def _recognize_sync(image: bytes) -> RecognizedReceipt:
         result = parse_receipt_lines(best.text.splitlines())
     except UnreadableReceipt as error:
         raise UnparsedReceipt(best.text, getattr(error, "parser_diagnostics", None)) from None
+    from bot.services.receipt_line_review import review_suspicious_lines
+    result = review_suspicious_lines(image, best, result)
+    if not result.items:
+        raise UnparsedReceipt(best.text, result.parser_diagnostics)
     logger.info("OCR result: strategy=%s segments=%s overlap=%.2f psms=%s ocr_lines=%s candidate_item_lines=%s accepted_items=%s rejected_candidates=%s elapsed=%.2f",
                 best.strategy, best.segment_count, best.overlap, best.psms, best.lines,
                 best.quality.get("candidate_item_lines", 0), len(result.items),

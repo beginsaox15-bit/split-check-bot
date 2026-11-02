@@ -89,10 +89,11 @@ def deskew(gray: np.ndarray) -> tuple[np.ndarray, float]:
     return cv2.warpAffine(gray, matrix, (out_w, out_h), borderValue=255), float(angle)
 
 
-def enhance_image(image: Image.Image, *, max_scale: float | None = None) -> Image.Image:
+def enhance_image(image: Image.Image, *, max_scale: float | None = None, requested_scale: float | None = None) -> Image.Image:
     """Та же обработка тона для полного кадра и каждого исходного сегмента."""
     gray = np.array(image)
-    scale = min(3.0 if max(gray.shape) < 1200 else 2.0, MAX_SIDE / max(gray.shape))
+    scale = min(requested_scale if requested_scale is not None else (3.0 if max(gray.shape) < 1200 else 2.0),
+                MAX_SIDE / max(gray.shape))
     if max_scale is not None:
         scale = min(scale, max_scale)
     gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
