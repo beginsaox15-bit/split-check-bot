@@ -4,6 +4,7 @@ The damaged first-pass text is injected; the crop and second-pass pixels are rea
 This is not a claimed improvement on the user's unavailable original photograph.
 """
 
+import os
 import shutil
 import unittest
 from io import BytesIO
@@ -23,6 +24,11 @@ from bot.services.tesseract_receipt_recognition import make_candidate
 
 
 class TargetedLineOCRIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"RECEIPT_OCR_BACKEND": "tesseract"}))
+        self.enterContext(patch("bot.services.openrouter_receipt_recognition._post",
+                                side_effect=AssertionError("Local smoke must not call OpenRouter")))
+
     async def test_real_crop_fixes_injected_damaged_price_through_photo_handler(self):
         if not shutil.which("tesseract") or not {"rus", "eng"}.issubset(pytesseract.get_languages(config="")):
             self.skipTest("Tesseract rus+eng required")

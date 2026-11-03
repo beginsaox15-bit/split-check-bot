@@ -1,4 +1,5 @@
 """Original local OCR and editing FSM; only Telegram transport is stubbed."""
+import os
 import shutil
 import unittest
 from decimal import Decimal
@@ -18,6 +19,11 @@ from bot.receipt_states import ReceiptInput
 
 
 class ReceiptEditingSmokeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"RECEIPT_OCR_BACKEND": "tesseract"}))
+        self.enterContext(patch("bot.services.openrouter_receipt_recognition._post",
+                                side_effect=AssertionError("Local smoke must not call OpenRouter")))
+
     async def test_native_ocr_edit_delete_add_finish_and_confirm(self):
         if not shutil.which('tesseract') or not {'rus','eng'}.issubset(pytesseract.get_languages(config='')):
             self.skipTest('Tesseract rus+eng required')

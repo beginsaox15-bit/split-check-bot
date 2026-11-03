@@ -1,5 +1,6 @@
+import os
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from aiogram import Bot, Dispatcher
 from aiogram.methods import AnswerCallbackQuery, SendMessage
@@ -15,6 +16,59 @@ from bot.services.receipt_models import (
 
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ai_photo_flows_through_existing_editor_and_confirmation(self):
+        from bot.services.receipt_recognition import recognize_receipt
+        from bot.services import openrouter_receipt_recognition as ai
+        from tests.test_openrouter_receipt_recognition import completion, image_bytes, payload
+
+        data = payload()
+        data['items'][0].update(name='Open Bar', uncertain=True, unit_price=None)
+        self.recognize.side_effect = recognize_receipt
+
+        async def download(file_id, *, destination, timeout):
+            destination.write(image_bytes())
+            return destination
+
+        self.download.side_effect = download
+        with patch.dict(os.environ, {'RECEIPT_OCR_BACKEND': 'openrouter',
+                                    'OPENROUTER_API_KEY': 'unit-test-secret',
+                                    'OPENROUTER_RECEIPT_MODEL': ai.DEFAULT_MODEL}), \
+                patch.object(ai, '_post', new_callable=AsyncMock, return_value=(200, completion(data))) as post, \
+                patch('bot.services.receipt_recognition.recognize_local', new_callable=AsyncMock) as local:
+            await self.dispatch(self.callback('split_check'))
+            replies = await self.dispatch(self.photo())
+            self.assertIn('Open Bar', replies[-1].text)
+            self.assertIn('⚠️', replies[-1].text)
+            self.assertIn('₽', replies[-1].text)
+            self.assertIn('Полная сумма: 0.2 ₽', replies[-1].text)
+            post.assert_awaited_once()
+            local.assert_not_awaited()
+            methods = await self.dispatch(self.callback('edit_recognition'))
+            methods = await self.editor_click(methods, 'select', 0)
+            await self.editor_click(methods, 'price')
+            methods = await self.dispatch(self.message('0,80'))
+            item = (await self.recognized_data())['items'][0]
+            self.assertEqual(item['total_price'], '0.20')
+            self.assertEqual(item['guest_id'], '1')
+            methods = await self.editor_click(methods, 'back')
+            await self.editor_click(methods, 'review')
+            await self.dispatch(self.callback('confirm_recognition'))
+            self.assertEqual(await self.context().get_state(), ReceiptInput.confirmed.state)
+            self.assertEqual((await self.context().get_data())['items'][0]['total_price'], '0.20')
+
+    async def test_fallback_notification_is_single_and_neutral(self):
+        async def fallback(image, *, on_fallback):
+            await on_fallback()
+            return self.recognize.return_value
+
+        self.recognize.side_effect = fallback
+        await self.dispatch(self.callback('split_check'))
+        methods = await self.dispatch(self.photo())
+        texts = [method.text for method in methods if isinstance(method, SendMessage)]
+        self.assertEqual(texts[0], 'Чек получен 🧾\nАнализирую позиции…')
+        self.assertEqual(texts[1], 'Основное распознавание временно недоступно, пробую резервный способ…')
+        self.assertEqual(len(texts), 3)
+
     async def test_suspect_prepayment_display_and_confirmation(self) -> None:
         from bot.services.receipt_parser import parse_receipt_lines
         self.recognize.return_value = parse_receipt_lines([
@@ -350,7 +404,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(methods), 2)
         self.assertIsInstance(methods[0], SendMessage)
         self.assertEqual(methods[0].chat_id, 42)
-        self.assertEqual(methods[0].text, "Чек получен 🧾\nРаспознаю текст…")
+        self.assertEqual(methods[0].text, "Чек получен 🧾\nАнализирую позиции…")
         self.assertEqual(methods[1].text,
                          "Я распознал чек 🧾\n\n1. Бургер × 2 — 1700 ₽\n"
                          "2. Коктейль — 650 ₽\n\n"
@@ -370,7 +424,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             "width": 960, "height": 1280, "file_size": 150000,
         })
         self.assertNotIn("items", data)
-        self.recognize.assert_awaited_once_with(b"test-image-bytes")
+        self.recognize.assert_awaited_once_with(b"test-image-bytes", on_fallback=ANY)
         self.assertEqual(self.download.await_args.args, ("large-photo",))
         self.assertTrue(self.download.await_args.kwargs["destination"].closed)
         self.assertEqual(await self.context(43).get_data(), {})

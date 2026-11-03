@@ -102,9 +102,10 @@ python -m tests.receipt_benchmark --json artifacts/receipt_benchmark/before.json
 `--case` можно указать несколько раз. Локальный Tesseract, `rus+eng` и зависимости
 из `requirements.txt` должны быть установлены. `BOT_TOKEN` не требуется,
 Telegram и внешние OCR API не вызываются. Настройки `.env` и окружения сохраняются;
-настройка `RECEIPT_OCR_BACKEND` должна соответствовать локальному Tesseract.
+benchmark напрямую вызывает локальный Tesseract независимо от
+`RECEIPT_OCR_BACKEND`, не обращаясь к OpenRouter.
 
-Benchmark вызывает тот же `recognize_receipt`, что обработчик фото: подготовка,
+Benchmark вызывает `tesseract_receipt_recognition.recognize_receipt`: подготовка,
 OSD, варианты изображения/PSM, проверка качества и существующий parser. Диагностические
 обёртки только записывают выбранный PSM и изображение; настоящие функции вызываются
 без замены результатов. Запуск идёт в отдельном процессе и не влияет на polling бота.

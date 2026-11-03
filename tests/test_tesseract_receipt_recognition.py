@@ -122,6 +122,9 @@ class TesseractBackendTests(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         # Все обращения к системному Tesseract подменены в unit-тестах.
+        self.enterContext(patch.dict(os.environ, {"RECEIPT_OCR_BACKEND": "tesseract"}))
+        self.enterContext(patch("bot.services.openrouter_receipt_recognition._post",
+                                side_effect=AssertionError("Local unit test must not call OpenRouter")))
         self.enterContext(patch.object(local.pytesseract, "image_to_osd", return_value={"rotate": 0}))
         self.languages = self.enterContext(patch.object(local.pytesseract, "get_languages", return_value=["rus", "eng"]))
         self.ocr = self.enterContext(patch.object(local.pytesseract, "image_to_data", return_value=ocr_data("Пицца 1800\nКофе 200\nИТОГО 2000")))

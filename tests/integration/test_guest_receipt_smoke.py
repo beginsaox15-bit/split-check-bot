@@ -1,10 +1,12 @@
 """Настоящий локальный OCR длинного чека -> handler -> проверка сумм и гостей."""
 
+import os
 import shutil
 import unittest
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytesseract
 from aiogram.fsm.context import FSMContext
@@ -16,6 +18,11 @@ from bot.services.receipt_models import RecognizedReceipt
 
 
 class GuestReceiptSmokeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"RECEIPT_OCR_BACKEND": "tesseract"}))
+        self.enterContext(patch("bot.services.openrouter_receipt_recognition._post",
+                                side_effect=AssertionError("Local smoke must not call OpenRouter")))
+
     async def test_real_ocr_quarantines_inconsistent_prepayment_and_ignores_dollar_noise(self):
         if not shutil.which("tesseract") or not {"rus", "eng"}.issubset(pytesseract.get_languages(config="")):
             self.skipTest("Tesseract rus+eng required")

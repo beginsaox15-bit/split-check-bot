@@ -80,11 +80,14 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
     # Повторное распознавание инвалидирует предыдущий неподтверждённый результат.
     await state.set_data({"receipt_photo": photo})
     await state.set_state(ReceiptInput.photo)
-    await message.answer("Чек получен 🧾\nРаспознаю текст…")
+    await message.answer("Чек получен 🧾\nАнализирую позиции…")
+
+    async def on_fallback() -> None:
+        await message.answer("Основное распознавание временно недоступно, пробую резервный способ…")
     try:
         with BytesIO() as image:
             await message.bot.download(photo["file_id"], destination=image, timeout=30)
-            result = await recognize_receipt(image.getvalue())
+            result = await recognize_receipt(image.getvalue(), on_fallback=on_fallback)
     except (TesseractNotInstalled, TesseractLanguagesUnavailable) as error:
         logger.exception("Local OCR setup missing: %s", type(error).__name__)
         await message.answer(

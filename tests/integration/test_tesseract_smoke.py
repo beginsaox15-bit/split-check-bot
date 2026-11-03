@@ -22,6 +22,11 @@ from bot.services.receipt_models import RecognizedReceipt
 
 
 class TesseractSmokeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"RECEIPT_OCR_BACKEND": "tesseract"}))
+        self.enterContext(patch("bot.services.openrouter_receipt_recognition._post",
+                                side_effect=AssertionError("Local smoke must not call OpenRouter")))
+
     async def test_real_russian_and_english_receipt(self) -> None:
         if not shutil.which("tesseract"):
             self.skipTest("System Tesseract is not installed")
@@ -62,7 +67,7 @@ class TesseractSmokeTests(unittest.IsolatedAsyncioTestCase):
             }})
             try:
                 await state.set_state(ReceiptInput.photo)
-                with patch.dict(os.environ, {"OPENAI_API_KEY": "", "RECEIPT_OCR_BACKEND": ""}), \
+                with patch.dict(os.environ, {"OPENAI_API_KEY": "", "RECEIPT_OCR_BACKEND": "tesseract"}), \
                         patch.object(bot, "download", new_callable=AsyncMock, side_effect=download) as fetch, \
                         patch.object(bot.session, "make_request", new_callable=AsyncMock) as request:
                     await dispatcher.feed_update(bot, update)

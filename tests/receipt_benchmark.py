@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from bot.services import tesseract_receipt_recognition as local
 from bot.services.receipt_models import LowQualityReceipt, UnparsedReceipt, UnreadableReceipt
-from bot.services.receipt_recognition import recognize_receipt
+from bot.services.tesseract_receipt_recognition import recognize_receipt
 from bot.services.receipt_parser import parse_receipt_lines
 
 

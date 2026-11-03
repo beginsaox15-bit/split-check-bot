@@ -67,13 +67,22 @@ class BackendSelectionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await recognize_receipt(b"image"), result)
                 local.assert_awaited_once_with(b"image")
 
-    async def test_explicit_and_blank_backend_use_tesseract(self) -> None:
-        for backend in ("tesseract", " TESSERACT ", ""):
+    async def test_explicit_backend_uses_tesseract(self) -> None:
+        for backend in ("tesseract", " TESSERACT "):
             with self.subTest(backend=backend):
                 with patch.dict(os.environ, {"RECEIPT_OCR_BACKEND": backend}):
                     with patch("bot.services.receipt_recognition.recognize_local", new_callable=AsyncMock) as local:
                         await recognize_receipt(b"image")
                         local.assert_awaited_once_with(b"image")
+
+    async def test_default_and_blank_backend_use_openrouter(self) -> None:
+        for backend in (None, ""):
+            with self.subTest(backend=backend), patch.dict(os.environ, {}, clear=True):
+                if backend is not None:
+                    os.environ["RECEIPT_OCR_BACKEND"] = backend
+                with patch("bot.services.receipt_recognition.recognize_openrouter", new_callable=AsyncMock) as ai:
+                    await recognize_receipt(b"image")
+                    ai.assert_awaited_once_with(b"image")
 
     async def test_local_failure_does_not_fall_back_to_external_api(self) -> None:
         with patch.dict(os.environ, {"RECEIPT_OCR_BACKEND": "tesseract", "OPENAI_API_KEY": "unused"}):

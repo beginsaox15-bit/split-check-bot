@@ -5,6 +5,7 @@ import shutil
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytesseract
 from aiogram.fsm.context import FSMContext
@@ -15,6 +16,11 @@ from bot.handlers import recognize_last_photo
 
 
 class TiltedReceiptPhotoTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"RECEIPT_OCR_BACKEND": "tesseract"}))
+        self.enterContext(patch("bot.services.openrouter_receipt_recognition._post",
+                                side_effect=AssertionError("Local smoke must not call OpenRouter")))
+
     async def test_real_tilted_photo_through_handler(self) -> None:
         filename = os.getenv("RECEIPT_SMOKE_PHOTO")
         if not filename:
