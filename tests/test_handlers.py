@@ -358,6 +358,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assert_buttons(methods[1], [
             [("✅ Всё верно", "confirm_recognition")],
             [("✏️ Исправить", "edit_recognition")],
+            [("➕ Добавить позицию", "add_recognition_item")],
             [("🔄 Распознать заново", "repeat_recognition")],
             [("📄 Показать распознанный текст", "show_recognized_text")],
             [("❌ Отменить", "cancel_receipt")],
@@ -490,11 +491,12 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("recognition", await self.context().get_data())
                 self.assertTrue(self.download.await_args.kwargs["destination"].closed)
 
-    async def test_repeat_downloads_last_photo_and_edit_is_placeholder(self) -> None:
+    async def test_repeat_downloads_last_photo_after_leaving_editor(self) -> None:
         await self.dispatch(self.callback("split_check"))
         await self.dispatch(self.photo())
         methods = await self.dispatch(self.callback("edit_recognition"))
-        self.assertEqual(methods[-1].text, "Редактирование распознанных позиций будет добавлено следующим этапом.")
+        self.assertIn("Выберите позицию", methods[-1].text)
+        await self.editor_click(methods, "review")
         await self.dispatch(self.callback("repeat_recognition"))
         self.assertEqual(self.download.await_count, 2)
         self.assertEqual(self.recognize.await_count, 2)
@@ -533,7 +535,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         methods = await self.dispatch(self.callback("show_recognized_text"))
         self.assertIn(self.recognize.return_value.raw_text, methods[-1].text)
         buttons = [b.text for row in methods[-1].reply_markup.inline_keyboard for b in row]
-        self.assertEqual(buttons, ["✅ Всё верно", "✏️ Исправить", "🔄 Распознать заново",
+        self.assertEqual(buttons, ["✅ Всё верно", "✏️ Исправить", "➕ Добавить позицию", "🔄 Распознать заново",
                                    "📄 Показать распознанный текст", "❌ Отменить"])
         self.assertEqual(await self.context().get_data(), before)
         self.assertEqual(await self.context().get_state(), ReceiptInput.review.state)
@@ -597,3 +599,280 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("developer-only diagnostic details", methods[-1].text)
         self.assertNotIn("ValueError", methods[-1].text)
         self.assertEqual(await self.context().get_state(), ReceiptInput.photo.state)
+
+    async def open_editor(self, user_id=42):
+        await self.dispatch(self.callback('split_check', user_id=user_id))
+        await self.dispatch(self.photo(user_id))
+        return await self.dispatch(self.callback('edit_recognition', user_id=user_id))
+
+    async def editor_click(self, methods, action, index=None, user_id=42):
+        for method in reversed(methods):
+            menu = getattr(method, 'reply_markup', None)
+            if menu is None:
+                continue
+            for row in menu.inline_keyboard:
+                for button in row:
+                    data = button.callback_data or ''
+                    parts = data.split(':')
+                    if parts[0] == 're' and parts[-1] == action and (index is None or int(parts[-2]) == index):
+                        return await self.dispatch(self.callback(data, user_id=user_id))
+        self.fail(f'Editor action not found: {action}/{index}')
+
+    async def recognized_data(self, user_id=42):
+        return (await self.context(user_id).get_data())['recognition']
+
+    async def test_editor_opens_item_details_and_returns_without_data_loss(self):
+        methods = await self.open_editor()
+        before = await self.recognized_data()
+        self.assertIn('Итого по позициям: 2350 ₽', methods[-1].text)
+        labels = [b.text for row in methods[-1].reply_markup.inline_keyboard for b in row]
+        self.assertIn('1. Бургер ×2 — 1700 ₽', labels)
+        detail = await self.editor_click(methods, 'select', 0)
+        self.assertIn('Количество: 2', detail[-1].text)
+        self.assertIn('Цена за единицу: 850 ₽', detail[-1].text)
+        methods = await self.editor_click(detail, 'back')
+        await self.editor_click(methods, 'review')
+        self.assertEqual(await self.context().get_state(), ReceiptInput.review.state)
+        self.assertEqual(await self.recognized_data(), before)
+
+    async def test_editor_changes_name_and_rejects_blank_names(self):
+        methods = await self.editor_click(await self.open_editor(), 'select', 0)
+        await self.editor_click(methods, 'name')
+        for text in (None, '', '   ', 'a' * 201):
+            await self.dispatch(self.message(text))
+            self.assertEqual((await self.recognized_data())['items'][0]['name'], 'Бургер')
+        methods = await self.dispatch(self.message('Бургер с сыром'))
+        self.assertIn('Бургер с сыром', methods[-1].text)
+        self.assertEqual((await self.recognized_data())['items'][0]['total_price'], '1700.00')
+
+    async def test_editor_fractional_quantity_recalculates_from_unit_price(self):
+        methods = await self.editor_click(await self.open_editor(), 'select', 0)
+        await self.editor_click(methods, 'quantity')
+        methods = await self.dispatch(self.message('1,5'))
+        item = (await self.recognized_data())['items'][0]
+        self.assertEqual(item['quantity'], '1.5')
+        self.assertEqual(item['total_price'], '1275.00')
+        self.assertIn('Итого по позициям: 1925 ₽', methods[-1].text)
+
+    async def test_editor_price_recalculates_total_using_decimal(self):
+        methods = await self.editor_click(await self.open_editor(), 'select', 0)
+        await self.editor_click(methods, 'price')
+        await self.dispatch(self.message('850,50'))
+        item = (await self.recognized_data())['items'][0]
+        self.assertEqual(item['unit_price'], '850.50')
+        self.assertEqual(item['total_price'], '1701.00')
+        self.assertNotIn('float', str(item))
+
+    async def test_editor_invalid_numeric_inputs_preserve_step_and_receipt(self):
+        for action, invalids in [
+            ('quantity', (None, '', '0', '-1', 'NaN', 'Infinity', '1e2', '1.1234567', '1000000000')),
+            ('price', (None, '', '0', '-1', 'abc', 'NaN', 'Infinity', '1e2', '1,2.3', '850.501', '1000000000000')),
+        ]:
+            await self.context().clear()
+            methods = await self.editor_click(await self.open_editor(), 'select', 0)
+            await self.editor_click(methods, action)
+            before = await self.recognized_data()
+            for value in invalids:
+                with self.subTest(action=action,value=value):
+                    await self.dispatch(self.message(value))
+                    self.assertEqual(await self.recognized_data(), before)
+                    self.assertEqual(await self.context().get_state(), f'ReceiptEditor:{action}')
+
+    async def test_editor_unknown_unit_price_requires_explicit_price(self):
+        self.recognize.return_value.items[0].unit_price = None
+        methods = await self.editor_click(await self.open_editor(), 'select', 0)
+        self.assertIn('Цена за единицу: не указана', methods[-1].text)
+        await self.editor_click(methods, 'quantity')
+        methods = await self.dispatch(self.message('3'))
+        self.assertIn('Цена за единицу не указана', methods[-1].text)
+        self.assertEqual((await self.recognized_data())['items'][0]['quantity'], '2')
+        # Back cancels the pending quantity instead of applying a guessed unit price.
+        methods = await self.editor_click(methods, 'cancel_input')
+        self.assertIsNone((await self.recognized_data())['items'][0]['unit_price'])
+        await self.editor_click(methods, 'quantity')
+        await self.dispatch(self.message('3'))
+        await self.dispatch(self.message('100'))
+        item = (await self.recognized_data())['items'][0]
+        self.assertEqual((item['quantity'],item['unit_price'],item['total_price']), ('3','100','300.00'))
+
+    async def test_editor_delete_confirmation_and_cancel(self):
+        methods = await self.editor_click(await self.open_editor(), 'select', 0)
+        methods = await self.editor_click(methods, 'delete')
+        self.assertEqual(methods[-1].text, 'Удалить позицию “Бургер”?')
+        methods = await self.editor_click(methods, 'no')
+        self.assertEqual(len((await self.recognized_data())['items']), 2)
+        methods = await self.editor_click(methods, 'delete')
+        methods = await self.editor_click(methods, 'yes')
+        self.assertEqual([x['name'] for x in (await self.recognized_data())['items']], ['Коктейль'])
+        self.assertIn('Итого по позициям: 650 ₽', methods[-1].text)
+
+    async def test_editor_add_uses_manual_flow_and_keeps_same_receipt(self):
+        methods = await self.open_editor()
+        before = await self.recognized_data()
+        await self.editor_click(methods, 'add')
+        self.assertEqual(await self.context().get_state(), ManualReceipt.name.state)
+        await self.dispatch(self.message('Картофель'))
+        await self.dispatch(self.message('350,50'))
+        methods = await self.dispatch(self.message('0,5'))
+        after = await self.recognized_data()
+        self.assertEqual(after['items'][:2], before['items'])
+        self.assertEqual(after['items'][2]['total_price'], '175.25')
+        self.assertEqual(after['receipt_total'], before['receipt_total'])
+        self.assertEqual(after['raw_text'], before['raw_text'])
+        self.assertEqual(await self.context().get_state(), 'ReceiptEditor:items')
+        self.assertIn('Итого по позициям: 2525.25 ₽', methods[-1].text)
+
+    async def test_editor_root_add_button_and_cancel_draft_keep_items(self):
+        await self.dispatch(self.callback('split_check'))
+        result = await self.dispatch(self.photo())
+        labels = [b.text for row in result[-1].reply_markup.inline_keyboard for b in row]
+        self.assertIn('➕ Добавить позицию', labels)
+        before = await self.recognized_data()
+        methods = await self.dispatch(self.callback('add_recognition_item'))
+        await self.dispatch(self.message('Новая позиция'))
+        await self.dispatch(self.message('200'))
+        await self.editor_click(methods, 'cancel_add')
+        self.assertEqual(await self.recognized_data(), before)
+        self.assertEqual(await self.context().get_state(), 'ReceiptEditor:items')
+
+    async def test_editor_identical_goods_edit_one_and_reject_stale_indices(self):
+        self.recognize.return_value.items[1] = self.recognize.return_value.items[0].model_copy(deep=True)
+        old = await self.open_editor()
+        methods = await self.editor_click(old, 'select', 1)
+        await self.editor_click(methods, 'name')
+        methods = await self.dispatch(self.message('Второй бургер'))
+        self.assertEqual([x['name'] for x in (await self.recognized_data())['items']], ['Бургер','Второй бургер'])
+        methods = await self.editor_click(methods, 'delete')
+        methods = await self.editor_click(methods, 'yes')
+        before = await self.context().get_data()
+        result = await self.editor_click(old, 'select', 1)
+        self.assertIsInstance(result[-1], AnswerCallbackQuery)
+        self.assertEqual(await self.context().get_data(), before)
+
+    async def test_editor_suspicious_marker_and_incomplete_ocr_message(self):
+        self.recognize.return_value.items[0].suspicious = True
+        self.recognize.return_value.items[0].suspicion_reasons = ['low_confidence']
+        await self.dispatch(self.callback('split_check'))
+        output = await self.dispatch(self.photo())
+        self.assertIn('Чек распознан не полностью.', output[-1].text)
+        self.assertNotIn('confidence', output[-1].text)
+        methods = await self.dispatch(self.callback('edit_recognition'))
+        labels = [b.text for row in methods[-1].reply_markup.inline_keyboard for b in row]
+        self.assertTrue(any(label.startswith('⚠️ 1. Бургер') for label in labels))
+        self.assertEqual(len((await self.recognized_data())['items']), 2)
+
+    async def test_editor_corrected_sum_removes_mismatch_and_preserves_ocr_facts(self):
+        self.recognize.return_value.gross_total = '2450.00'
+        self.recognize.return_value.prepayment = '500.00'
+        self.recognize.return_value.amount_due = '1950.00'
+        methods = await self.open_editor()
+        before = await self.recognized_data()
+        self.assertIn('не совпадает', methods[-1].text)
+        methods = await self.editor_click(methods, 'select', 1)
+        await self.editor_click(methods, 'price')
+        methods = await self.dispatch(self.message('750'))
+        self.assertNotIn('не совпадает', methods[-1].text)
+        methods = await self.editor_click(methods, 'back')
+        methods = await self.editor_click(methods, 'finish')
+        self.assertNotIn('Сумма позиций не совпадает', methods[-1].text)
+        self.assertNotIn('Сумма позиций не совпадает с итогом чека', methods[-1].text)
+        after = await self.recognized_data()
+        for field in ['gross_total','prepayment','amount_due','receipt_total','raw_text']:
+            self.assertEqual(after[field], before[field])
+
+    async def test_editor_paginated_long_receipt_callbacks_fit_telegram(self):
+        from bot.services.receipt_models import ReceiptItem
+        self.recognize.return_value.items = [ReceiptItem(name=f'Товар {i} '+ 'я'*120, quantity='1', unit_price='1', total_price='1') for i in range(45)]
+        methods = await self.open_editor()
+        self.assertIn('Страница 1/3', methods[-1].text)
+        buttons = [b for row in methods[-1].reply_markup.inline_keyboard for b in row]
+        self.assertEqual(sum(b.callback_data.endswith(':select') for b in buttons),20)
+        self.assertTrue(all(len(b.callback_data.encode())<=64 for b in buttons))
+        methods = await self.editor_click(methods, 'page', 1)
+        methods = await self.editor_click(methods, 'select', 20)
+        self.assertIn('Товар 20', methods[-1].text)
+        self.assertEqual(len((await self.recognized_data())['items']),45)
+
+    async def test_editor_users_are_isolated(self):
+        first = await self.open_editor(42)
+        second = await self.open_editor(43)
+        first = await self.editor_click(first,'select',0,user_id=42)
+        await self.editor_click(first,'price',user_id=42)
+        await self.dispatch(self.message('900',42))
+        second = await self.editor_click(second,'select',1,user_id=43)
+        await self.editor_click(second,'name',user_id=43)
+        await self.dispatch(self.message('Другой напиток',43))
+        self.assertEqual((await self.recognized_data(42))['items'][0]['unit_price'],'900')
+        self.assertEqual((await self.recognized_data(43))['items'][0]['unit_price'],'850.00')
+        self.assertEqual((await self.recognized_data(42))['items'][1]['name'],'Коктейль')
+        self.assertEqual((await self.recognized_data(43))['items'][1]['name'],'Другой напиток')
+
+    async def test_editor_photos_and_old_manual_entry_do_not_reset_items(self):
+        methods = await self.open_editor()
+        before = await self.recognized_data()
+        await self.dispatch(self.photo())
+        await self.dispatch(self.callback('manual_entry'))
+        await self.dispatch(self.callback('confirm_recognition'))
+        self.assertEqual(await self.recognized_data(),before)
+        self.assertEqual(self.recognize.await_count,1)
+
+    async def test_ocr_edit_delete_add_finish_confirm_scenario(self):
+        self.recognize.return_value.gross_total = '2500.00'
+        methods = await self.open_editor()
+        before = await self.recognized_data()
+        methods = await self.editor_click(methods,'select',0)
+        await self.editor_click(methods,'price')
+        methods = await self.dispatch(self.message('900'))
+        methods = await self.editor_click(methods,'back')
+        methods = await self.editor_click(methods,'select',1)
+        methods = await self.editor_click(methods,'delete')
+        methods = await self.editor_click(methods,'yes')
+        await self.editor_click(methods,'add')
+        await self.dispatch(self.message('Картофель'))
+        await self.dispatch(self.message('350'))
+        methods = await self.dispatch(self.message('2'))
+        self.assertIn('Итого по позициям: 2500 ₽',methods[-1].text)
+        methods = await self.editor_click(methods,'finish')
+        self.assertNotIn('Сумма позиций не совпадает',methods[-1].text)
+        await self.dispatch(self.callback('confirm_recognition'))
+        data = await self.context().get_data()
+        self.assertEqual(await self.context().get_state(),ReceiptInput.confirmed.state)
+        self.assertEqual([x['name'] for x in data['items']],['Бургер','Картофель'])
+        self.assertEqual([x['total_price'] for x in data['items']],['1800.00','700.00'])
+        self.assertEqual(data['gross_total'],before['gross_total'])
+        self.assertEqual(data['receipt_total'],before['receipt_total'])
+        self.assertNotIn('recognition',data)
+
+    async def test_editor_deleting_every_item_allows_add_but_not_empty_confirmation(self):
+        methods = await self.open_editor()
+        for _ in range(2):
+            methods = await self.editor_click(methods,'select',0)
+            methods = await self.editor_click(methods,'delete')
+            methods = await self.editor_click(methods,'yes')
+        self.assertIn('пока нет позиций',methods[-1].text)
+        self.assertEqual((await self.recognized_data())['items'],[])
+        await self.editor_click(methods,'finish')
+        methods = await self.dispatch(self.callback('confirm_recognition'))
+        self.assertIsInstance(methods[-1],AnswerCallbackQuery)
+        self.assertEqual(await self.context().get_state(),ReceiptInput.review.state)
+        await self.dispatch(self.callback('add_recognition_item'))
+        await self.dispatch(self.message('Суп'))
+        await self.dispatch(self.message('500'))
+        methods = await self.dispatch(self.message('1'))
+        self.assertEqual(len((await self.recognized_data())['items']),1)
+        self.assertIn('Итого по позициям: 500 ₽',methods[-1].text)
+
+    async def test_editor_rejects_other_users_buttons(self):
+        first = await self.open_editor(42)
+        await self.open_editor(43)
+        before = await self.context(43).get_data()
+        result = await self.editor_click(first,'select',0,user_id=43)
+        self.assertIsInstance(result[-1],AnswerCallbackQuery)
+        self.assertEqual(await self.context(43).get_data(),before)
+
+    async def test_small_ocr_without_known_total_prompts_manual_check(self):
+        self.recognize.return_value.receipt_total = None
+        await self.dispatch(self.callback('split_check'))
+        methods = await self.dispatch(self.photo())
+        self.assertIn('Чек распознан не полностью.',methods[-1].text)
+        self.assertIn('добавьте пропущенные',methods[-1].text)

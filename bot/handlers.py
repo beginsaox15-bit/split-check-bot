@@ -1,16 +1,17 @@
 import logging
-from decimal import Decimal
 from io import BytesIO
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from bot.receipt import money, parse_price, parse_quantity, receipt_lines
+from bot.receipt import parse_price, parse_quantity, receipt_lines
+from bot.receipt_states import ManualReceipt, ReceiptInput, ReceiptEditor
+from bot.receipt_view import RECOGNITION_MENU, answer_in_parts, show_recognition
+from bot import receipt_editor
 from bot.services.receipt_models import (
-    LowQualityReceipt, RecognizedReceipt, TesseractLanguagesUnavailable,
+    LowQualityReceipt, RecognizedReceipt, ReceiptItem, TesseractLanguagesUnavailable,
     TesseractNotInstalled, UnparsedReceipt, UnreadableReceipt,
 )
 from bot.services.receipt_recognition import recognize_receipt
@@ -18,19 +19,6 @@ from bot.services.receipt_recognition import recognize_receipt
 
 router = Router()
 logger = logging.getLogger(__name__)
-
-
-class ManualReceipt(StatesGroup):
-    name = State()
-    price = State()
-    quantity = State()
-    review = State()
-
-
-class ReceiptInput(StatesGroup):
-    photo = State()
-    review = State()
-    confirmed = State()
 
 
 START_TEXT = (
@@ -60,14 +48,6 @@ UNREADABLE_TEXT = (
     "Попробуйте сфотографировать его ближе, ровнее и без теней."
 )
 
-RECOGNITION_MENU = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="✅ Всё верно", callback_data="confirm_recognition")],
-    [InlineKeyboardButton(text="✏️ Исправить", callback_data="edit_recognition")],
-    [InlineKeyboardButton(text="🔄 Распознать заново", callback_data="repeat_recognition")],
-    [InlineKeyboardButton(text="📄 Показать распознанный текст", callback_data="show_recognized_text")],
-    [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_receipt")],
-])
-
 RAW_TEXT_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="manual_entry")],
     [InlineKeyboardButton(text="🔄 Распознать заново", callback_data="repeat_recognition")],
@@ -89,22 +69,6 @@ async def show_receipt(message: Message, items: list[dict], *, finished: bool = 
         f"{index}. {line}" for index, line in enumerate(lines, 1)
     ) + f"\n\nИтого: {total} ₽"
     await answer_in_parts(message, text, START_MENU if finished else RECEIPT_MENU)
-
-
-async def answer_in_parts(message: Message, text: str, menu: InlineKeyboardMarkup) -> None:
-    # Длинный чек отправляем частями; кнопки находятся под последней частью.
-    chunks = []
-    # 2000 символов укладываются в лимит Telegram и при наличии emoji.
-    while len(text) > 2000:
-        split_at = text.rfind("\n", 0, 2000)
-        if split_at <= 0:
-            split_at = 2000
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    chunks.append(text)
-    for chunk in chunks[:-1]:
-        await message.answer(chunk)
-    await message.answer(chunks[-1], reply_markup=menu)
 
 
 async def recognize_last_photo(message: Message, state: FSMContext) -> None:
@@ -157,51 +121,7 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(recognition=result.model_dump(mode="json"))
     await state.set_state(ReceiptInput.review)
-    currency = "₽" if result.currency == "RUB" else (result.currency or "")
-    lines = [
-        f"{index}. {item.name}"
-        + (f" (гость {item.guest_id})" if item.guest_id else "")
-        + (f" × {money(Decimal(item.quantity))}" if Decimal(item.quantity) != 1 else "")
-        + f" — {money(Decimal(item.total_price))} {currency}".rstrip()
-        + (" ⚠️ проверьте" if item.suspicious else "")
-        for index, item in enumerate(result.items, 1)
-    ]
-    text = "Я распознал чек 🧾\n\n" + "\n".join(lines)
-    text += f"\n\nИтого по найденным позициям: {money(result.items_total)} {currency}".rstrip()
-    if any(value is not None for value in (result.gross_total, result.prepayment, result.amount_due)):
-        for label, value in (("Полная сумма", result.gross_total), ("Предоплата", result.prepayment),
-                             ("Итого к оплате", result.amount_due)):
-            if value is not None:
-                text += f"\n{label}: {money(Decimal(value))} {currency}".rstrip()
-                if label == "Предоплата" and not result.prepayment_verified:
-                    text += " (не проверена по итогам)"
-    elif result.receipt_total is not None:
-        total = f"{money(Decimal(result.receipt_total))} {currency}".rstrip()
-        text += f"\nИтого в чеке: {total}"
-    if result.currency is None:
-        text += "\nВалюта не определена."
-    if result.gross_total is None and result.derived_gross_total is not None:
-        text += f"\nПолная сумма (вычислена из предоплаты и остатка): {money(Decimal(result.derived_gross_total))} {currency}"
-        if result.missing_difference:
-            text += f"\nРазница с суммой найденных позиций: {money(result.missing_difference)} {currency}. Проверьте полноту чека."
-    if result.totals_mismatch:
-        text += "\n\n⚠️ OCR мог распознать чек неточно. Сумма позиций не совпадает с итогом чека."
-    if result.guest_subtotals:
-        text += f"\nСумма итогов гостей: {money(result.guest_subtotals_total)} {currency}".rstrip()
-    if result.guest_subtotals_mismatch:
-        text += "\n⚠️ Сумма итогов гостей не совпадает с полной суммой чека."
-    if result.payment_mismatch:
-        text += "\n⚠️ Полная сумма минус предоплата не совпадает с суммой к оплате."
-    if result.prepayment_suspect:
-        text += f"\n⚠️ Предоплата прочитана как {money(Decimal(result.prepayment_ocr))} {currency}; требует проверки и не используется в расчётах."
-        if result.calculated_prepayment is not None:
-            text += f"\nРазница полной суммы и остатка: {money(result.calculated_prepayment)} {currency}. Это не подтверждённая предоплата."
-    if result.skipped_lines:
-        text += f"\n⚠️ Сомнительные строки пропущены: {result.skipped_lines}. Проверьте чек."
-    for warning in result.parse_warnings:
-        text += "\n⚠️ " + warning
-    text += "\n\nПроверьте позиции перед подтверждением."
-    await answer_in_parts(message, text, RECOGNITION_MENU)
+    await show_recognition(message, result)
 
 
 @router.message(CommandStart())
@@ -251,6 +171,9 @@ async def manual_entry(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() not in (None, ReceiptInput.photo.state, ReceiptInput.review.state):
         await callback.answer("Чек уже открыт. Продолжите ввод или отмените его.")
         return
+    if (await state.get_data()).get("recognition") is not None:
+        await callback.answer("Чтобы дополнить текущий чек, нажмите «➕ Добавить позицию».")
+        return
     await callback.answer()
     if isinstance(callback.message, Message):
         await state.set_data({"items": []})
@@ -291,6 +214,10 @@ async def receipt_photo(message: Message, state: FSMContext) -> None:
             reply_markup=RECEIPT_MENU if current_state == ManualReceipt.review.state else None,
         )
         return
+    if current_state in {ReceiptEditor.items.state, ReceiptEditor.item.state, ReceiptEditor.name.state,
+                         ReceiptEditor.quantity.state, ReceiptEditor.price.state, ReceiptEditor.delete.state}:
+        await message.answer("Сейчас открыт редактор чека. Закончите исправления или отмените чек.")
+        return
     await message.answer(
         "Чтобы добавить фото чека, нажмите «🧾 Разделить чек» и отправьте фотографию ещё раз.",
         reply_markup=START_MENU,
@@ -302,6 +229,9 @@ async def confirm_recognition(callback: CallbackQuery, state: FSMContext) -> Non
     data = await state.get_data()
     if await state.get_state() != ReceiptInput.review.state or not data.get("recognition"):
         await callback.answer("Нет распознанного чека для подтверждения.")
+        return
+    if not data["recognition"]["items"]:
+        await callback.answer("Добавьте хотя бы одну позицию перед подтверждением.")
         return
     await callback.answer()
     if isinstance(callback.message, Message):
@@ -325,9 +255,12 @@ async def confirm_recognition(callback: CallbackQuery, state: FSMContext) -> Non
 
 @router.callback_query(F.data == "edit_recognition")
 async def edit_recognition(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != ReceiptInput.review.state or not (await state.get_data()).get("recognition"):
+        await callback.answer("Нет открытого распознанного чека.")
+        return
     await callback.answer()
-    if isinstance(callback.message, Message) and await state.get_state() == ReceiptInput.review.state:
-        await callback.message.answer("Редактирование распознанных позиций будет добавлено следующим этапом.")
+    if isinstance(callback.message, Message):
+        await receipt_editor.show_items(callback.message, state)
 
 
 @router.callback_query(F.data == "repeat_recognition")
@@ -369,17 +302,19 @@ async def retry_photo(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(ManualReceipt.name)
 async def item_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
-    if not name:
+    editing = (await state.get_data()).get("manual_target") == "recognition"
+    if not name or (editing and len(name) > 200):
         await message.answer("Введите название позиции текстом.")
         return
     await state.update_data(name=name)
     await state.set_state(ManualReceipt.price)
-    await message.answer("Введите цену позиции в рублях.")
+    await message.answer("Введите цену за одну единицу." if editing else "Введите цену позиции в рублях.")
 
 
 @router.message(ManualReceipt.price)
 async def item_price(message: Message, state: FSMContext) -> None:
-    price = parse_price(message.text)
+    editing = (await state.get_data()).get("manual_target") == "recognition"
+    price = receipt_editor.decimal_input(message.text) if editing else parse_price(message.text)
     if price is None:
         await message.answer("Введите цену больше 0: целое число или число с точкой или запятой.")
         return
@@ -390,11 +325,32 @@ async def item_price(message: Message, state: FSMContext) -> None:
 
 @router.message(ManualReceipt.quantity)
 async def item_quantity(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("manual_target") == "recognition":
+        quantity = receipt_editor.decimal_input(message.text, quantity=True)
+        if quantity is None:
+            await message.answer("Введите положительное количество (до 6 знаков после запятой).")
+            return
+        result = await receipt_editor.current_receipt(state)
+        if result is None:
+            await message.answer("Начните новый чек.")
+            return
+        try:
+            item = ReceiptItem(name=data["name"], quantity=format(quantity, "f"), unit_price=data["price"],
+                               total_price=receipt_editor.total_price(quantity, data["price"]))
+            if len(result.items) >= 200:
+                raise ValueError("Too many items")
+            await receipt_editor.save_items(state, result, [*result.items, item])
+        except ValueError:
+            await message.answer("Не удалось добавить позицию: проверьте количество и сумму (максимум 200 позиций).")
+            return
+        await state.update_data(manual_target=None, name=None, price=None)
+        await receipt_editor.show_items(message, state, data.get("receipt_edit_page", 0))
+        return
     quantity = parse_quantity(message.text)
     if quantity is None:
         await message.answer("Введите количество: целое число больше 0.")
         return
-    data = await state.get_data()
     items = [*data["items"], {"name": data["name"], "price": data["price"], "quantity": quantity}]
     await state.set_data({"items": items})
     await state.set_state(ManualReceipt.review)
@@ -430,3 +386,6 @@ async def cancel_receipt(callback: CallbackQuery, state: FSMContext) -> None:
     if isinstance(callback.message, Message):
         await state.clear()
         await callback.message.answer("Ввод отменён. Текущий чек очищен.", reply_markup=START_MENU)
+
+
+router.include_router(receipt_editor.router)
