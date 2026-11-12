@@ -4,11 +4,12 @@ from decimal import Decimal
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.expense_split import Allocation, add_participant, assign_item, complete, participant_totals, snapshot
 from bot.receipt_states import ExpenseAllocation, ReceiptInput
 from bot.receipt_view import answer_in_parts
+from bot.settlements import balances, confirm_settlement, set_payment, settlement_issues, transfers
 
 router = Router(name='expense_allocation')
 PAGE_SIZE = 10
@@ -69,7 +70,7 @@ def overview_text(plan):
     if plan.amount_due is not None:
         text += f'\nОстаток к оплате по чеку: {amount(plan.amount_due, plan)}'
     if plan.prepayment is not None or plan.amount_due is not None:
-        text += '\nПредоплата и остаток отдельно между участниками пока не распределяются.'
+        text += '\nПосле распределения укажите фактические оплаты, включая предоплату, по каждому плательщику.'
     text += f'\n\nНераспределённые позиции: {len(plan.unassigned)}'
     missing = {item.id for item in plan.unassigned}
     for index, item in enumerate(plan.items, 1):
@@ -83,7 +84,8 @@ async def show_overview(message, state, plan):
     await state.set_state(ExpenseAllocation.done if plan.completed else ExpenseAllocation.overview)
     button = await buttons(state)
     if plan.completed:
-        rows = [[button('✏️ Изменить распределение', 'reopen')]]
+        rows = [[button('💳 Оплаты и переводы', 'payments')],
+                [button('✏️ Изменить распределение', 'reopen')]]
     else:
         rows = [[button('➕ Добавить участника', 'add')],
                 [button('🧾 Назначить позиции', 'items')],
@@ -133,6 +135,80 @@ async def show_selection(message, state, plan, index, selected):
     await answer_in_parts(message, text, InlineKeyboardMarkup(inline_keyboard=rows))
 
 
+def payments_text(plan):
+    owed = participant_totals(plan)
+    net = balances(plan)
+    text = 'Расчёт переводов подтверждён ✅' if plan.settlement_confirmed else 'Оплаты и предварительный расчёт'
+    text += '\nБаланс = оплачено в ресторан минус доля. Плюс — к получению, минус — к переводу.'
+    for person in plan.participants:
+        paid = plan.payments.get(person.id, '0.00')
+        missing = ' (не указано, считается 0)' if person.id not in plan.payments else ''
+        text += (f'\n\n{person.name}\nДоля: {amount(owed[person.id], plan)}'
+                 f'\nОплачено: {amount(paid, plan)}{missing}\nБаланс: {amount(net[person.id], plan)}')
+    text += f'\n\nСумма позиций: {amount(plan.items_total, plan)}'
+    text += f'\nСумма оплат: {amount(plan.paid_total, plan)}'
+    if plan.gross_total is not None:
+        text += f'\nПолная сумма чека: {amount(plan.gross_total, plan)}'
+    if plan.prepayment is not None:
+        text += f'\nПредоплата по чеку: {amount(plan.prepayment, plan)}'
+    text += ('\nПредоплата автоматически не добавляется. Включите её ровно один раз в общую '
+             'оплату внёсшего её участника. Переводы между участниками в эти оплаты не включайте.')
+    issues = settlement_issues(plan)
+    if 'allocation_incomplete' in issues:
+        text += '\n⚠️ Сначала завершите распределение всех позиций.'
+    if 'receipt_mismatch' in issues:
+        text += '\n⚠️ Сумма позиций не совпадает с общей суммой чека. Проверьте исходный чек.'
+    if 'payments_mismatch' in issues:
+        text += '\n⚠️ Сумма оплат не совпадает с суммой распределённых позиций. Исправьте оплаты.'
+    if issues:
+        text += '\nРасчёт переводов не подтверждён. Окончательный список недоступен до устранения расхождений.'
+    else:
+        names = {person.id: person.name for person in plan.participants}
+        moves = transfers(plan)
+        text += '\n\n' + ('Переводы:' if plan.settlement_confirmed else 'Предварительные переводы:')
+        for move in moves:
+            text += f'\n{names[move.sender_id]} → {names[move.recipient_id]}: {amount(move.amount, plan)}'
+        if not moves:
+            text += '\nПереводы не нужны: каждый оплатил свою долю.'
+        text += '\nЭто расчёт; переводы участники выполняют самостоятельно.'
+    return text
+
+
+async def show_payments(message, state, plan, page=0):
+    page = max(0, min(page, (len(plan.participants)-1)//PAGE_SIZE))
+    await state.set_state(ExpenseAllocation.payments)
+    await state.update_data(payment_page=page, payment_person=None, payment_prompt_id=None)
+    button = await buttons(state)
+    rows = [[button('✏️ ' + person.name[:30] + ' — ' + plan.payments.get(person.id, '0.00'), 'paid', index)]
+            for index, person in enumerate(plan.participants) if page*PAGE_SIZE <= index < (page+1)*PAGE_SIZE]
+    navigation = []
+    if page:
+        navigation.append(button('⬅️', 'payments', page-1))
+    if (page+1)*PAGE_SIZE < len(plan.participants):
+        navigation.append(button('➡️', 'payments', page+1))
+    if navigation:
+        rows.append(navigation)
+    if not plan.settlement_confirmed:
+        rows.append([button('✅ Подтвердить расчёт переводов', 'pay_confirm')])
+    rows.append([button('↩️ К распределению', 'split_back')])
+    await answer_in_parts(message, payments_text(plan), InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+async def show_payment_input(message, state, plan, index):
+    person = plan.participants[index]
+    await state.set_state(ExpenseAllocation.payment_amount)
+    await state.update_data(payment_person=person.id, payment_prompt_id=None)
+    button = await buttons(state)
+    prompt = await message.answer(
+        f'{person.name}: сколько всего оплачено в ресторан? Сейчас: {amount(plan.payments.get(person.id, "0"), plan)}. '
+        'Ответьте на это сообщение суммой с точностью до копейки, например 1500,50; 0 снимает оплату. '
+        'Включите внесённую этим участником предоплату. Новое значение заменит прежнее и сбросит подтверждение расчёта.',
+        reply_markup=ForceReply(selective=True, input_field_placeholder='Например: 1500,50'))
+    await state.update_data(payment_prompt_id=prompt.message_id)
+    await message.answer('Можно вернуться без изменения оплаты.', reply_markup=InlineKeyboardMarkup(
+        inline_keyboard=[[button('↩️ Назад без сохранения', 'payments', index//PAGE_SIZE)]]))
+
+
 @router.callback_query(F.data.startswith('sp:'))
 async def allocation_callback(callback: CallbackQuery, state: FSMContext):
     parts = (callback.data or '').split(':')
@@ -163,8 +239,12 @@ async def allocation_callback(callback: CallbackQuery, state: FSMContext):
         'toggle': {ExpenseAllocation.item.state}, 'apply': {ExpenseAllocation.item.state},
         'clear': {ExpenseAllocation.item.state}, 'finish': {ExpenseAllocation.overview.state},
         'reopen': {ExpenseAllocation.done.state},
-        'overview': ALLOCATION_STATES - {ExpenseAllocation.done.state},
+        'overview': {ExpenseAllocation.overview.state, ExpenseAllocation.name.state,
+                     ExpenseAllocation.items.state, ExpenseAllocation.item.state},
         'back': {ExpenseAllocation.overview.state},
+        'payments': {ExpenseAllocation.done.state, ExpenseAllocation.payments.state, ExpenseAllocation.payment_amount.state},
+        'paid': {ExpenseAllocation.payments.state}, 'pay_confirm': {ExpenseAllocation.payments.state},
+        'split_back': {ExpenseAllocation.payments.state},
     }
     if current not in allowed.get(action, set()) or index < 0:
         await callback.answer('Действие сейчас недоступно.')
@@ -172,10 +252,17 @@ async def allocation_callback(callback: CallbackQuery, state: FSMContext):
     if action == 'finish' and plan.unassigned:
         await callback.answer(f'Остались нераспределённые позиции: {len(plan.unassigned)}.', show_alert=True)
         return
+    if action in {'payments', 'paid', 'pay_confirm'} and not plan.completed:
+        await callback.answer('Сначала завершите распределение позиций.')
+        return
+    if action == 'pay_confirm' and settlement_issues(plan):
+        await callback.answer('Расчёт не подтверждён: проверьте суммы оплат, позиций и общий итог чека.', show_alert=True)
+        return
     if action in {'items', 'select'} and not plan.participants:
         await callback.answer('Сначала добавьте хотя бы одного участника.')
         return
-    if action == 'select' and index >= len(plan.items) or action == 'toggle' and index >= len(plan.participants):
+    if (action == 'select' and index >= len(plan.items)
+            or action in {'toggle', 'paid'} and index >= len(plan.participants)):
         await callback.answer('Позиция или участник не найдены.')
         return
     await callback.answer()
@@ -214,12 +301,22 @@ async def allocation_callback(callback: CallbackQuery, state: FSMContext):
         await save(state, plan)
         await show_overview(message, state, plan)
     elif action == 'reopen':
-        plan = Allocation.model_validate({**plan.model_dump(), 'completed': False})
+        plan = Allocation.model_validate({**plan.model_dump(), 'completed': False, 'settlement_confirmed': False})
         await save(state, plan)
         await show_overview(message, state, plan)
     elif action == 'back':
         await state.set_state(ReceiptInput.confirmed)
         await message.answer('Чек сохранён. Распределение можно продолжить.', reply_markup=await entry_menu(state))
+    elif action == 'payments':
+        await show_payments(message, state, plan, index)
+    elif action == 'paid':
+        await show_payment_input(message, state, plan, index)
+    elif action == 'pay_confirm':
+        plan = confirm_settlement(plan)
+        await save(state, plan)
+        await show_payments(message, state, plan, data.get('payment_page', 0))
+    elif action == 'split_back':
+        await show_overview(message, state, plan)
 
 
 @router.message(ExpenseAllocation.name)
@@ -239,3 +336,29 @@ async def participant_name(message: Message, state: FSMContext):
     await save(state, plan)
     await state.update_data(allocation_seen_messages=[*data.get('allocation_seen_messages', []), message.message_id])
     await show_overview(message, state, plan)
+
+
+@router.message(ExpenseAllocation.payment_amount)
+async def payment_amount(message: Message, state: FSMContext):
+    data = await state.get_data()
+    plan = Allocation.model_validate(data['allocation'])
+    if (message.from_user is None or message.from_user.id != plan.owner_user_id
+            or message.chat.id != plan.owner_chat_id):
+        return
+    if (message.reply_to_message is None
+            or message.reply_to_message.message_id != data.get('payment_prompt_id')):
+        await message.answer('Ответьте суммой на последнее сообщение с вопросом об оплате.')
+        return
+    person_id = data.get('payment_person')
+    if not plan.completed or person_id not in {person.id for person in plan.participants}:
+        await show_overview(message, state, plan)
+        return
+    index = next(i for i, person in enumerate(plan.participants) if person.id == person_id)
+    try:
+        plan = set_payment(plan, person_id, message.text or '')
+    except ValueError:
+        await message.answer('Нужна неотрицательная сумма с максимум двумя знаками после запятой, без округления.')
+        await show_payment_input(message, state, plan, index)
+        return
+    await save(state, plan)
+    await show_payments(message, state, plan, index//PAGE_SIZE)

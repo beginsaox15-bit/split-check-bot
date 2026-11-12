@@ -10,12 +10,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.methods import AnswerCallbackQuery, SendMessage
-from aiogram.types import Update
+from aiogram.types import InlineKeyboardMarkup, Message, Update
 
 from bot.handlers import router
 from bot.expense_split import Allocation, participant_totals
 from bot.receipt_states import ExpenseAllocation, ManualReceipt, ReceiptInput
 from bot.services.receipt_models import RecognizedReceipt
+from bot.settlements import balances
 
 
 class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -36,6 +37,10 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
                           key=StorageKey(bot_id=123456, chat_id=chat, user_id=user))
 
     async def asyncSetUp(self):
+        # Each IsolatedAsyncioTestCase owns a different loop; concurrent tests
+        # must not reuse asyncio locks bound by an earlier test's loop.
+        await self.dispatcher.fsm.events_isolation.close()
+        self.dispatcher.fsm.events_isolation = SimpleEventIsolation()
         self.ids = itertools.count(100)
         self.menu = None
         for user, chat in ((42, 42), (43, 42), (42, 43)):
@@ -51,10 +56,16 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
     async def send(self, payload):
         update = Update.model_validate({'update_id': next(self.ids), **payload})
         async with Bot(token='123456:TEST_TOKEN') as bot:
-            with patch.object(bot.session, 'make_request', new_callable=AsyncMock) as request:
+            async def response(current_bot, method, **kwargs):
+                if isinstance(method, SendMessage):
+                    return Message.model_validate({'message_id': next(self.ids), 'date': 1,
+                        'chat': {'id': method.chat_id, 'type': 'private'}, 'text': method.text,
+                        'from': {'id': 123456, 'is_bot': True, 'first_name': 'Bot'}}, context={'bot': current_bot})
+                return True
+            with patch.object(bot.session, 'make_request', new_callable=AsyncMock, side_effect=response) as request:
                 await self.dispatcher.feed_update(bot, update)
         methods = [call.args[1] for call in request.await_args_list]
-        menus = [m for m in methods if isinstance(m, SendMessage) and m.reply_markup]
+        menus = [m for m in methods if isinstance(m, SendMessage) and isinstance(m.reply_markup, InlineKeyboardMarkup)]
         if menus:
             self.menu = menus[-1].reply_markup
         return methods
@@ -71,10 +82,14 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
     async def callback(self, data, **kwargs):
         return await self.send(self.callback_payload(data, **kwargs))
 
-    async def message(self, text, message_id=None):
-        return await self.send({'message': {'message_id': message_id or next(self.ids), 'date': 1,
+    async def message(self, text, message_id=None, reply_to=None):
+        payload = {'message': {'message_id': message_id or next(self.ids), 'date': 1,
                                            'from': {'id': 42, 'is_bot': False, 'first_name': 'Test'},
-                                           'chat': {'id': 42, 'type': 'private'}, 'text': text}})
+                                           'chat': {'id': 42, 'type': 'private'}, 'text': text}}
+        if reply_to is not None:
+            payload['message']['reply_to_message'] = {'message_id': reply_to, 'date': 1,
+                                                     'chat': {'id': 42, 'type': 'private'}, 'text': 'Payment prompt'}
+        return await self.send(payload)
 
     def code(self, action, index=0):
         return next(b.callback_data for row in self.menu.inline_keyboard for b in row
@@ -283,3 +298,171 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('распределение расходов', methods[-1].text)
         self.assertEqual(await self.context().get_data(), before)
         self.recognize.assert_not_awaited()
+
+    async def payment_ready(self, count=1, price='9', people=3):
+        await self.manual(count=count, price=price)
+        await self.click('begin')
+        await self.people(people)
+        await self.click('items')
+        for index in range(count):
+            await self.assign(index, list(range(people)))
+        await self.click('overview')
+        await self.click('finish')
+        return await self.click('payments')
+
+    async def enter_payment(self, index, value):
+        await self.click('paid', index)
+        prompt = (await self.context().get_data())['payment_prompt_id']
+        return await self.message(value, reply_to=prompt)
+
+    async def test_one_payer_and_confirmed_transfers(self):
+        methods = await self.payment_ready()
+        self.assertIn('не указано', methods[-1].text)
+        methods = await self.click('pay_confirm')
+        self.assertIn('не подтверждён', methods[-1].text)
+        methods = await self.enter_payment(0, '9,00')
+        self.assertIn('Предварительные переводы:', methods[-1].text)
+        self.assertIn('Участник 2 → Участник 1: 3.00 ₽', methods[-1].text)
+        old = self.code('pay_confirm')
+        methods = await self.callback(old)
+        self.assertIn('Расчёт переводов подтверждён ✅', methods[-1].text)
+        self.assertTrue((await self.plan()).settlement_confirmed)
+        before = await self.context().get_data()
+        await self.callback(old)
+        self.assertEqual(await self.context().get_data(), before)
+
+    async def test_multiple_payers_prepaid_amount_is_explicit(self):
+        await self.payment_ready(price='10')
+        plan = await self.plan()
+        plan = Allocation.model_validate({**plan.model_dump(), 'prepayment': '4.00', 'amount_due': '6.00'})
+        await self.context().update_data(allocation=plan.model_dump(mode='json'))
+        methods = await self.enter_payment(1, '6')
+        self.assertEqual((await self.plan()).paid_total, Decimal('6'))
+        self.assertIn('автоматически не добавляется', methods[-1].text)
+        self.assertIn('Сумма оплат не совпадает', methods[-1].text)
+        self.assertNotIn(' → ', methods[-1].text)
+        methods = await self.enter_payment(0, '4')
+        self.assertEqual((await self.plan()).paid_total, Decimal('10'))
+        self.assertIn('Предварительные переводы', methods[-1].text)
+        await self.click('pay_confirm')
+        self.assertTrue((await self.plan()).settlement_confirmed)
+
+    async def test_payment_edit_replaces_value_and_invalidates_confirmation(self):
+        await self.payment_ready()
+        await self.enter_payment(0, '9')
+        await self.click('pay_confirm')
+        methods = await self.enter_payment(0, '8.99')
+        self.assertEqual((await self.plan()).payments, {'p0': '8.99'})
+        self.assertFalse((await self.plan()).settlement_confirmed)
+        self.assertIn('Сумма оплат не совпадает', methods[-1].text)
+        self.assertNotIn(' → ', methods[-1].text)
+        await self.enter_payment(0, '0')
+        self.assertEqual((await self.plan()).paid_total, 0)
+        await self.enter_payment(1, '9')
+        await self.click('pay_confirm')
+        self.assertTrue((await self.plan()).settlement_confirmed)
+
+    async def test_receipt_mismatch_blocks_final_debts_even_with_balanced_payments(self):
+        await self.payment_ready()
+        plan = await self.plan()
+        plan = Allocation.model_validate({**plan.model_dump(), 'gross_total': '10.00'})
+        await self.context().update_data(allocation=plan.model_dump(mode='json'))
+        methods = await self.enter_payment(0, '9')
+        self.assertIn('Сумма позиций не совпадает', methods[-1].text)
+        self.assertNotIn(' → ', methods[-1].text)
+        await self.click('pay_confirm')
+        self.assertFalse((await self.plan()).settlement_confirmed)
+
+    async def test_old_replies_duplicates_and_invalid_payment_input(self):
+        await self.payment_ready()
+        await self.click('paid')
+        old_prompt = (await self.context().get_data())['payment_prompt_id']
+        await self.message('0.001', reply_to=old_prompt)
+        self.assertEqual((await self.plan()).payments, {})
+        new_prompt = (await self.context().get_data())['payment_prompt_id']
+        self.assertNotEqual(old_prompt, new_prompt)
+        await self.message('9', reply_to=old_prompt)
+        await self.message('9')
+        self.assertEqual((await self.plan()).payments, {})
+        await self.message('9', message_id=999, reply_to=new_prompt)
+        await self.click('paid', 1)
+        await self.message('9', message_id=999, reply_to=new_prompt)
+        self.assertEqual((await self.plan()).payments, {'p0': '9.00'})
+        await self.click('payments')
+        await self.click('paid', 1)
+        prompt = (await self.context().get_data())['payment_prompt_id']
+        await asyncio.gather(self.message('0', message_id=1001, reply_to=prompt),
+                             self.message('0', message_id=1001, reply_to=prompt))
+        self.assertEqual((await self.plan()).payments, {'p0': '9.00', 'p1': '0.00'})
+
+    async def test_payment_callbacks_are_scoped_and_forged_indices_rejected(self):
+        await self.payment_ready()
+        valid = self.code('paid')
+        before = await self.context().get_data()
+        for user, chat in ((43, 42), (42, 43)):
+            await self.context(user, chat).set_state(ExpenseAllocation.payments)
+            await self.context(user, chat).set_data(before)
+            methods = await self.callback(valid, user=user, chat=chat)
+            self.assertIn('другого', methods[-1].text)
+            self.assertEqual(await self.context(user, chat).get_data(), before)
+        await self.callback(valid.rsplit(':', 1)[0]+':999')
+        self.assertEqual(await self.context().get_data(), before)
+        await self.click('paid')
+        after = await self.context().get_data()
+        await self.callback(valid)
+        self.assertEqual(await self.context().get_data(), after)
+
+    async def test_reallocation_keeps_payments_and_recalculates_balances(self):
+        await self.payment_ready()
+        await self.enter_payment(0, '9')
+        await self.click('pay_confirm')
+        await self.click('split_back')
+        await self.click('reopen')
+        self.assertFalse((await self.plan()).settlement_confirmed)
+        await self.click('items')
+        await self.click('select')
+        await self.click('clear')
+        await self.assign(0, [1])
+        await self.click('overview')
+        await self.click('finish')
+        methods = await self.click('payments')
+        self.assertEqual((await self.plan()).payments, {'p0': '9.00'})
+        self.assertEqual(balances(await self.plan())['p1'], Decimal('-9'))
+        self.assertIn('Участник 2 → Участник 1: 9.00 ₽', methods[-1].text)
+        self.assertFalse((await self.plan()).settlement_confirmed)
+
+    async def test_kopeck_payments_and_zero_debts(self):
+        await self.payment_ready(count=2, price='0.05')
+        for index, value in enumerate(('0.04', '0.04', '0.02')):
+            methods = await self.enter_payment(index, value)
+        self.assertIn('Переводы не нужны', methods[-1].text)
+        await self.click('pay_confirm')
+        self.assertTrue((await self.plan()).settlement_confirmed)
+
+    async def test_cancel_payment_edit_preserves_confirmed_amounts(self):
+        await self.payment_ready()
+        await self.enter_payment(0, '9')
+        await self.click('pay_confirm')
+        before = (await self.plan()).model_dump()
+        await self.click('paid', 0)
+        prompt = (await self.context().get_data())['payment_prompt_id']
+        await self.click('payments')
+        self.assertEqual((await self.plan()).model_dump(), before)
+        await self.message('8', reply_to=prompt)
+        self.assertEqual((await self.plan()).model_dump(), before)
+
+    async def test_foreign_payment_reply_cannot_mutate_copied_context(self):
+        await self.payment_ready()
+        await self.click('paid')
+        before = await self.context().get_data()
+        for user, chat in ((43, 42), (42, 43)):
+            context = self.context(user, chat)
+            await context.set_state(ExpenseAllocation.payment_amount)
+            await context.set_data(before)
+            await self.send({'message': {'message_id': next(self.ids), 'date': 1,
+                'from': {'id': user, 'is_bot': False, 'first_name': 'Test'},
+                'chat': {'id': chat, 'type': 'private'}, 'text': '9',
+                'reply_to_message': {'message_id': before['payment_prompt_id'], 'date': 1,
+                                     'chat': {'id': chat, 'type': 'private'}, 'text': 'Prompt'}}})
+            self.assertEqual(await context.get_data(), before)
+        self.assertEqual(await self.context().get_data(), before)
