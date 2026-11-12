@@ -44,7 +44,9 @@ class Allocation(BaseModel):
     participants: list[Participant] = Field(default_factory=list, max_length=30)
     assignments: dict[str, list[str]] = Field(default_factory=dict)
     gross_total: Money | None = None
+    receipt_total: Money | None = None
     prepayment: Money | None = None
+    prepayment_suspect: bool = False
     amount_due: Money | None = None
     currency: str | None = None
     # A display hint derived from explicit text markers, separate from OCR facts.
@@ -53,6 +55,7 @@ class Allocation(BaseModel):
     payments: dict[str, PaymentAmount] = Field(default_factory=dict)
     tip_amount: PaymentAmount = '0.00'
     tip_payer_id: str | None = None
+    discount_amount: PaymentAmount = '0.00'
     settlement_confirmed: bool = False
 
     @model_validator(mode='after')
@@ -74,8 +77,10 @@ class Allocation(BaseModel):
             raise ValueError('Zero tips cannot have a payer')
         if Decimal(self.tip_amount) > 0 and not people:
             raise ValueError('Tips require participants')
+        if Decimal(self.discount_amount) > self.items_total:
+            raise ValueError('Discount exceeds item total')
         if self.settlement_confirmed and (not self.completed or self.unassigned
-                                          or self.mismatch or self.paid_total != self.items_total
+                                          or self.mismatch or self.paid_total != self.restaurant_total
                                           or Decimal(self.tip_amount) > 0 and self.tip_payer_id is None):
             raise ValueError('Settlement is not reconciled')
         return self
@@ -92,7 +97,46 @@ class Allocation(BaseModel):
 
     @property
     def mismatch(self):
-        return self.gross_total is not None and self.items_total != Decimal(self.gross_total)
+        return bool(self.receipt_total_issues)
+
+    @property
+    def receipt_total_issues(self):
+        # Legacy zero-discount reconciliation remains unchanged. A stored positive
+        # discount is an explicit user decision, never inferred from OCR totals.
+        before = self.items_total
+        if Decimal(self.discount_amount) == 0:
+            return ['gross_mismatch'] if self.gross_total is not None and before != Decimal(self.gross_total) else []
+        after = self.restaurant_total
+        issues = []
+        for value in (self.gross_total, self.receipt_total):
+            if value is not None and Decimal(value) not in {before, after}:
+                issues.append('unexplained_total')
+                break
+        # These two OCR fields normally duplicate the same printed total; if
+        # they differ, their meanings cannot safely be inferred from arithmetic.
+        if (self.gross_total is not None and self.receipt_total is not None
+                and Decimal(self.gross_total) != Decimal(self.receipt_total)):
+            issues.append('conflicting_totals')
+        if self.prepayment_suspect:
+            issues.append('suspect_prepayment')
+        prepaid = Decimal(self.prepayment) if self.prepayment is not None else None
+        due = Decimal(self.amount_due) if self.amount_due is not None else None
+        if prepaid is not None and prepaid > after:
+            issues.append('prepayment_exceeds_restaurant')
+        if due is not None:
+            with localcontext() as context:
+                context.prec = 32
+                if prepaid is None and due != after:
+                    issues.append('ambiguous_due_without_prepayment')
+                elif prepaid is not None and prepaid + due != after:
+                    issues.append('payment_totals_mismatch')
+        return issues
+
+    @property
+    def restaurant_total(self):
+        with localcontext() as context:
+            context.prec = 32
+            return self.items_total - Decimal(self.discount_amount)
 
     @property
     def paid_total(self):
@@ -104,7 +148,7 @@ class Allocation(BaseModel):
     def expenses_total(self):
         with localcontext() as context:
             context.prec = 32
-            return self.items_total + Decimal(self.tip_amount)
+            return self.restaurant_total + Decimal(self.tip_amount)
 
 
 def snapshot(data: dict, *, user_id: int, chat_id: int) -> Allocation:
@@ -126,7 +170,9 @@ def snapshot(data: dict, *, user_id: int, chat_id: int) -> Allocation:
                                amount=format(amount, '.2f'), guest_id=source.get('guest_id')))
     return Allocation(owner_user_id=user_id, owner_chat_id=chat_id, items=items,
                       gross_total=data.get('gross_total') or data.get('receipt_total'),
+                      receipt_total=data.get('receipt_total'),
                       prepayment=data.get('prepayment'), amount_due=data.get('amount_due'),
+                      prepayment_suspect=data.get('prepayment_suspect', False),
                       currency=data.get('currency'),
                       ruble_evidence=data.get('ruble_evidence', False) or rubles_confirmed(data.get('raw_text', '')))
 
@@ -181,6 +227,36 @@ def participant_totals(plan: Allocation) -> dict[str, Decimal]:
                 for person, amount in split_amount(item.amount, owners).items():
                     totals[person] += amount
     return totals
+
+
+def discount_shares(plan: Allocation) -> dict[str, Decimal]:
+    """Largest remainders on pre-discount restaurant shares, in whole kopecks."""
+    result = {person.id: Decimal(0) for person in plan.participants}
+    if Decimal(plan.discount_amount) == 0:
+        return result
+    if plan.unassigned:
+        raise ValueError('Complete all assignments before splitting a discount')
+    with localcontext() as context:
+        context.prec = 32
+        shares = participant_totals(plan)
+        total_cents = int(plan.items_total * 100)
+        discount_cents = int(Decimal(plan.discount_amount) * 100)
+        # Integer products/divmod preserve fractional remainders exactly, even
+        # when monetary amounts approach their maximum supported size.
+        parts = [divmod(discount_cents * int(shares[p.id]*100), total_cents) for p in plan.participants]
+        cents = [quotient for quotient, _ in parts]
+        remainder = discount_cents - sum(cents)
+        order = sorted(range(len(parts)), key=lambda i: (-parts[i][1], i))
+        for index in order[:remainder]:
+            cents[index] += 1
+        return {person.id: Decimal(cents[index])/100 for index, person in enumerate(plan.participants)}
+
+
+def restaurant_shares(plan: Allocation) -> dict[str, Decimal]:
+    before, discounts = participant_totals(plan), discount_shares(plan)
+    with localcontext() as context:
+        context.prec = 32
+        return {person.id: before[person.id] - discounts[person.id] for person in plan.participants}
 
 
 def complete(plan: Allocation) -> Allocation:
