@@ -2,17 +2,20 @@
 from bot.receipt_states import ExpenseAllocation
 
 
-def new_session(data, person_id, update_id, message_floor):
+def new_session(data, person_id, update_id, message_floor, *, kind='payment'):
     if type(update_id) is not int or type(message_floor) is not int:
         raise ValueError('Payment input requires Telegram update/message IDs')
-    return {'token': data['allocation_token'], 'revision': data['allocation_revision'],
+    if kind not in {'payment', 'tip'}:
+        raise ValueError('Unknown money input kind')
+    return {'token': data['allocation_token'], 'revision': data['allocation_revision'], 'kind': kind,
             'person_id': person_id, 'started_update_id': update_id,
             'message_floor': max(message_floor, data.get('payment_last_message_id', 0))}
 
 
 def accepts_message(data, plan, state_name, *, user_id, chat_id, message_id, update_id, is_reply=False):
     session = data.get('payment_input')
-    if (state_name != ExpenseAllocation.payment_amount.state or not isinstance(session, dict)
+    kind = {ExpenseAllocation.payment_amount.state: 'payment', ExpenseAllocation.tip_amount.state: 'tip'}.get(state_name)
+    if (kind is None or not isinstance(session, dict) or session.get('kind') != kind
             or not plan.completed or is_reply
             or user_id != plan.owner_user_id or chat_id != plan.owner_chat_id):
         return False
@@ -21,7 +24,8 @@ def accepts_message(data, plan, state_name, *, user_id, chat_id, message_id, upd
             or type(session.get('revision')) is not int
             or session.get('revision') != data.get('allocation_revision')
             or session.get('person_id') != data.get('payment_person')
-            or session.get('person_id') not in {person.id for person in plan.participants}):
+            or kind == 'payment' and session.get('person_id') not in {person.id for person in plan.participants}
+            or kind == 'tip' and session.get('person_id') is not None):
         return False
     values = (message_id, update_id, session.get('started_update_id'), session.get('message_floor'),
               data.get('payment_last_message_id', 0), data.get('payment_last_update_id', -1))

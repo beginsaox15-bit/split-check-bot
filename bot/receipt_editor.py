@@ -12,6 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.receipt import money
+from bot.currency import receipt_currency, symbol
 from bot.receipt_states import ManualReceipt, ReceiptInput, ReceiptEditor
 from bot.receipt_view import show_recognition, suspicious
 from bot.services.receipt_models import RecognizedReceipt, ReceiptItem
@@ -51,7 +52,7 @@ def changed_item(item, **changes):
 
 
 def currency(receipt):
-    return '₽' if receipt.currency == 'RUB' else receipt.currency or ''
+    return symbol(receipt_currency(receipt))
 
 
 def receipt_summary(receipt):

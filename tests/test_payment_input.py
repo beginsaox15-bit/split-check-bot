@@ -74,3 +74,14 @@ class PlainPaymentInputTests(unittest.TestCase):
     def test_session_requires_update_context(self):
         with self.assertRaises(ValueError):
             new_session(self.data, 'p0', None, 50)
+
+    def test_tip_and_restaurant_input_cannot_consume_each_others_messages(self):
+        data = deepcopy(self.data)
+        data['payment_person'] = None
+        data['payment_input'] = new_session(data, None, 100, 50, kind='tip')
+        self.assertTrue(self.accepts(data=data, state_name=ExpenseAllocation.tip_amount.state))
+        self.assertFalse(self.accepts(data=data))
+        self.assertFalse(self.accepts(state_name=ExpenseAllocation.tip_amount.state))
+        self.assertFalse(self.accepts(data=data,state_name=ExpenseAllocation.tip_payer.state))
+        data['payment_person'] = data['payment_input']['person_id'] = 'p0'
+        self.assertFalse(self.accepts(data=data,state_name=ExpenseAllocation.tip_amount.state))

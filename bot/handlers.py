@@ -10,6 +10,7 @@ from bot.receipt import parse_price, parse_quantity, receipt_lines
 from bot.receipt_states import ManualReceipt, ReceiptInput, ReceiptEditor
 from bot.receipt_view import RECOGNITION_MENU, answer_in_parts, show_recognition
 from bot import receipt_editor, allocation_handlers
+from bot.currency import receipt_currency
 from bot.services.receipt_models import (
     LowQualityReceipt, RecognizedReceipt, ReceiptItem, TesseractLanguagesUnavailable,
     TesseractNotInstalled, UnparsedReceipt, UnreadableReceipt,
@@ -252,6 +253,7 @@ async def confirm_recognition(callback: CallbackQuery, state: FSMContext) -> Non
             "items": [item.model_dump(mode="json", exclude_defaults=True) for item in result.items],
             "receipt_total": result.receipt_total,
             "currency": result.currency,
+            "ruble_evidence": result.currency is None and receipt_currency(result) == 'RUB',
             "gross_total": result.gross_total,
             "prepayment": result.prepayment,
             "prepayment_ocr": result.prepayment_ocr,

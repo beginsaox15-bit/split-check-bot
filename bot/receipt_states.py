@@ -32,3 +32,5 @@ class ExpenseAllocation(StatesGroup):
     done = State()
     payments = State()
     payment_amount = State()
+    tip_amount = State()
+    tip_payer = State()

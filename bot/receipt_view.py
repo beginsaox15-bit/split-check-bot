@@ -4,6 +4,7 @@ from decimal import Decimal
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from bot.receipt import money
 from bot.services.receipt_models import RecognizedReceipt
+from bot.currency import receipt_currency, symbol
 
 
 RECOGNITION_MENU = InlineKeyboardMarkup(inline_keyboard=[
@@ -37,7 +38,8 @@ async def answer_in_parts(message: Message, text: str, menu: InlineKeyboardMarku
 
 
 async def show_recognition(message: Message, result: RecognizedReceipt, *, edited: bool = False) -> None:
-    currency = "₽" if result.currency == "RUB" else (result.currency or "")
+    shown_currency = receipt_currency(result)
+    currency = symbol(shown_currency)
     lines = [
         f"{index}. {item.name}"
         + (f" (гость {item.guest_id})" if item.guest_id else "")
@@ -59,8 +61,10 @@ async def show_recognition(message: Message, result: RecognizedReceipt, *, edite
     elif result.receipt_total is not None:
         total = f"{money(Decimal(result.receipt_total))} {currency}".rstrip()
         text += f"\nИтого в чеке: {total}"
-    if result.currency is None:
+    if shown_currency is None:
         text += "\nВалюта не определена."
+    elif result.currency is None:
+        text += "\nВалюта: RUB (по обозначению на чеке; поле OCR не изменено)."
     if result.gross_total is None and result.derived_gross_total is not None:
         text += f"\nПолная сумма (вычислена из предоплаты и остатка): {money(Decimal(result.derived_gross_total))} {currency}"
         if result.missing_difference:

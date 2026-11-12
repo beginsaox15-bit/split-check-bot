@@ -6,6 +6,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from bot.services.receipt_models import Money
+from bot.currency import rubles_confirmed
 
 # A single payer may cover up to 200 maximum-sized item lines.
 PaymentAmount = Annotated[str, Field(pattern=r'^(0|[1-9][0-9]{0,14})(\.[0-9]{1,2})?$')]
@@ -46,8 +47,12 @@ class Allocation(BaseModel):
     prepayment: Money | None = None
     amount_due: Money | None = None
     currency: str | None = None
+    # A display hint derived from explicit text markers, separate from OCR facts.
+    ruble_evidence: bool = False
     completed: bool = False
     payments: dict[str, PaymentAmount] = Field(default_factory=dict)
+    tip_amount: PaymentAmount = '0.00'
+    tip_payer_id: str | None = None
     settlement_confirmed: bool = False
 
     @model_validator(mode='after')
@@ -63,8 +68,15 @@ class Allocation(BaseModel):
             raise ValueError('Unassigned items remain')
         if not set(self.payments) <= people:
             raise ValueError('Unknown payer')
+        if self.tip_payer_id is not None and self.tip_payer_id not in people:
+            raise ValueError('Unknown tip payer')
+        if Decimal(self.tip_amount) == 0 and self.tip_payer_id is not None:
+            raise ValueError('Zero tips cannot have a payer')
+        if Decimal(self.tip_amount) > 0 and not people:
+            raise ValueError('Tips require participants')
         if self.settlement_confirmed and (not self.completed or self.unassigned
-                                          or self.mismatch or self.paid_total != self.items_total):
+                                          or self.mismatch or self.paid_total != self.items_total
+                                          or Decimal(self.tip_amount) > 0 and self.tip_payer_id is None):
             raise ValueError('Settlement is not reconciled')
         return self
 
@@ -88,6 +100,12 @@ class Allocation(BaseModel):
             context.prec = 32
             return sum((Decimal(value) for value in self.payments.values()), Decimal(0))
 
+    @property
+    def expenses_total(self):
+        with localcontext() as context:
+            context.prec = 32
+            return self.items_total + Decimal(self.tip_amount)
+
 
 def snapshot(data: dict, *, user_id: int, chat_id: int) -> Allocation:
     items = []
@@ -109,7 +127,8 @@ def snapshot(data: dict, *, user_id: int, chat_id: int) -> Allocation:
     return Allocation(owner_user_id=user_id, owner_chat_id=chat_id, items=items,
                       gross_total=data.get('gross_total') or data.get('receipt_total'),
                       prepayment=data.get('prepayment'), amount_due=data.get('amount_due'),
-                      currency=data.get('currency'))
+                      currency=data.get('currency'),
+                      ruble_evidence=data.get('ruble_evidence', False) or rubles_confirmed(data.get('raw_text', '')))
 
 
 def add_participant(plan: Allocation, name: str) -> Allocation:
