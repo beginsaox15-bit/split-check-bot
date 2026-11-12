@@ -30,3 +30,5 @@ class ExpenseAllocation(StatesGroup):
     items = State()
     item = State()
     done = State()
+    payments = State()
+    payment_amount = State()

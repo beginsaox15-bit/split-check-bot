@@ -1,10 +1,14 @@
 """Per-receipt allocations. Receipt amounts are facts, never balancing targets."""
 import unicodedata
 from decimal import Decimal, localcontext
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from bot.services.receipt_models import Money
+
+# A single payer may cover up to 200 maximum-sized item lines.
+PaymentAmount = Annotated[str, Field(pattern=r'^(0|[1-9][0-9]{0,14})(\.[0-9]{1,2})?$')]
 
 
 def decimal_amount(value):
@@ -43,6 +47,8 @@ class Allocation(BaseModel):
     amount_due: Money | None = None
     currency: str | None = None
     completed: bool = False
+    payments: dict[str, PaymentAmount] = Field(default_factory=dict)
+    settlement_confirmed: bool = False
 
     @model_validator(mode='after')
     def valid_assignments(self):
@@ -55,6 +61,11 @@ class Allocation(BaseModel):
                 raise ValueError('Invalid assignment')
         if self.completed and self.unassigned:
             raise ValueError('Unassigned items remain')
+        if not set(self.payments) <= people:
+            raise ValueError('Unknown payer')
+        if self.settlement_confirmed and (not self.completed or self.unassigned
+                                          or self.mismatch or self.paid_total != self.items_total):
+            raise ValueError('Settlement is not reconciled')
         return self
 
     @property
@@ -70,6 +81,12 @@ class Allocation(BaseModel):
     @property
     def mismatch(self):
         return self.gross_total is not None and self.items_total != Decimal(self.gross_total)
+
+    @property
+    def paid_total(self):
+        with localcontext() as context:
+            context.prec = 32
+            return sum((Decimal(value) for value in self.payments.values()), Decimal(0))
 
 
 def snapshot(data: dict, *, user_id: int, chat_id: int) -> Allocation:
@@ -103,6 +120,7 @@ def add_participant(plan: Allocation, name: str) -> Allocation:
     if any(person.name.casefold() == name.casefold() for person in plan.participants):
         raise ValueError('Participant already exists')
     data = plan.model_dump()
+    data['settlement_confirmed'] = False
     data['participants'].append({'id': f'p{len(plan.participants)}', 'name': name})
     return Allocation.model_validate(data)
 
@@ -111,6 +129,7 @@ def assign_item(plan: Allocation, item_id: str, people: list[str]) -> Allocation
     if plan.completed or item_id not in {item.id for item in plan.items}:
         raise ValueError('Invalid item')
     data = plan.model_dump()
+    data['settlement_confirmed'] = False
     data['assignments'][item_id] = list(people)
     return Allocation.model_validate(data)
 
