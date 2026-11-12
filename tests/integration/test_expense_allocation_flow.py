@@ -703,3 +703,298 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
         self.edit_error = None
         self.assert_single_edit(await self.message('9'), self.menu_message_id)
         self.assertEqual((await self.plan()).payments, {'p0': '9.00'})
+
+    async def enter_tips(self, value, payer=0):
+        self.assert_single_edit(await self.click('tips'), self.menu_message_id)
+        methods = await self.message(value)
+        self.assert_single_edit(methods, self.menu_message_id)
+        if Decimal(value.replace(',', '.')) > 0:
+            self.assertEqual(await self.context().get_state(), ExpenseAllocation.tip_payer.state)
+            methods = await self.click('tip_who', payer)
+            self.assert_single_edit(methods, self.menu_message_id)
+        return methods
+
+    async def test_tips_and_restaurant_payers_example(self):
+        await self.message('/start')
+        await self.callback('split_check')
+        await self.callback('manual_entry')
+        for index, price in enumerate(('5130', '4810', '4300')):
+            if index:
+                await self.callback('add_item')
+            await self.message('Тестовая позиция')
+            await self.message(price)
+            await self.message('1')
+        await self.callback('finish_receipt')
+        await self.click('begin')
+        for name in ('Никита', 'Андрей', 'Артём'):
+            await self.click('add')
+            await self.message(name)
+        await self.click('items')
+        for i in range(3):
+            await self.assign(i,[i])
+        await self.click('overview')
+        await self.click('finish')
+        await self.click('payments')
+        await self.enter_payment(1,'14240')
+        before = await self.plan()
+        methods = await self.enter_tips('900',2)
+        text = self.text(methods)
+        self.assertIn('Никита → Андрей: 5430.00 ₽',text)
+        self.assertIn('Артём → Андрей: 3700.00 ₽',text)
+        self.assertIn('Общие расходы: 15140.00 ₽',text)
+        self.assertIn('Ресторанные оплаты: 14240.00 ₽',text)
+        self.assertIn('Чаевые оплатил(а): Артём',text)
+        plan = await self.plan()
+        self.assertEqual(plan.payments,{'p1':'14240.00'})
+        self.assertEqual(balances(plan),{'p0':Decimal('-5430'),'p1':Decimal('9130'),'p2':Decimal('-3700')})
+        for field in ('items','gross_total','prepayment','amount_due','assignments'):
+            self.assertEqual(plan.model_dump()[field], before.model_dump()[field])
+        self.assert_single_edit(await self.click('pay_confirm'),self.menu_message_id)
+        self.assertTrue((await self.plan()).settlement_confirmed)
+
+    async def test_tip_amount_payer_changes_and_zero_edit_the_same_screen(self):
+        await self.payment_ready()
+        await self.enter_payment(0,'9')
+        await self.enter_tips('0,05',2)
+        self.assertEqual((await self.plan()).tip_amount,'0.05')
+        from bot.settlements import tip_shares
+        self.assertEqual(tip_shares(await self.plan()),{'p0':Decimal('.02'),'p1':Decimal('.02'),'p2':Decimal('.01')})
+        await self.click('pay_confirm')
+        before = await self.plan()
+        self.assert_single_edit(await self.click('tip_payer_edit'),self.menu_message_id)
+        old = self.code('tip_who',1)
+        self.assert_single_edit(await self.callback(old),self.menu_message_id)
+        self.assertFalse((await self.plan()).settlement_confirmed)
+        self.assertEqual((await self.plan()).tip_payer_id,'p1')
+        self.assertEqual((await self.plan()).tip_amount,before.tip_amount)
+        snapshot = await self.context().get_data()
+        await self.callback(old)
+        self.assertEqual(await self.context().get_data(),snapshot)
+        await self.enter_tips('0.06',0)
+        self.assertEqual((await self.plan()).tip_amount,'0.06')
+        self.assertEqual((await self.plan()).tip_payer_id,'p0')
+        await self.click('pay_confirm')
+        self.assertTrue((await self.plan()).settlement_confirmed)
+        await self.enter_tips('0')
+        plan = await self.plan()
+        self.assertEqual(plan.tip_amount,'0.00')
+        self.assertIsNone(plan.tip_payer_id)
+        self.assertFalse(plan.settlement_confirmed)
+        self.assertEqual(plan.payments,{'p0':'9.00'})
+
+    async def test_tip_drafts_cancel_without_changing_confirmed_amount_or_payer(self):
+        await self.payment_ready()
+        await self.enter_payment(0,'9')
+        await self.enter_tips('1',2)
+        await self.click('pay_confirm')
+        before = (await self.plan()).model_dump()
+        for typed in (None,'2'):
+            await self.click('tips')
+            if typed:
+                self.assert_single_edit(await self.message(typed),self.menu_message_id)
+            self.assertEqual((await self.plan()).model_dump(),before)
+            self.assert_single_edit(await self.click('payments'),self.menu_message_id)
+            self.assertEqual((await self.plan()).model_dump(),before)
+            self.assertIsNone((await self.context().get_data())['tip_draft_amount'])
+            await self.message('3')
+            self.assertEqual((await self.plan()).model_dump(),before)
+        await self.click('tip_payer_edit')
+        await self.click('payments')
+        self.assertEqual((await self.plan()).model_dump(),before)
+
+    async def test_invalid_tip_amounts_retry_plain_text_without_force_reply(self):
+        await self.payment_ready()
+        await self.click('tips')
+        original = (await self.plan()).model_dump()
+        for value in ('-1','0.001','1e2','NaN','1000000000000000','abc'):
+            methods = await self.message(value)
+            edit = self.assert_single_edit(methods,self.menu_message_id)
+            self.assertNotIsInstance(edit.reply_markup,ForceReply)
+            self.assertIn('Нужна неотрицательная',edit.text)
+            self.assertEqual(await self.context().get_state(),ExpenseAllocation.tip_amount.state)
+            self.assertEqual((await self.plan()).model_dump(),original)
+        self.assert_single_edit(await self.message('1,01'),self.menu_message_id)
+        self.assert_single_edit(await self.click('tip_who',1),self.menu_message_id)
+        self.assertEqual((await self.plan()).tip_amount,'1.01')
+
+    async def test_tip_messages_require_owner_chat_current_session_and_fresh_ids(self):
+        await self.payment_ready()
+        await self.click('tips')
+        before = await self.context().get_data()
+        for user,chat in ((43,42),(42,43)):
+            other = self.context(user,chat)
+            await other.set_data(before)
+            await other.set_state(ExpenseAllocation.tip_amount)
+            await self.send({'message': {'message_id':next(self.ids),'date':1,
+                'from':{'id':user,'is_bot':False,'first_name':'Test'},
+                'chat':{'id':chat,'type':'private'},'text':'1'}})
+            self.assertEqual(await other.get_data(),before)
+        for changes in ({'allocation_token':'old-receipt'},{'allocation_revision':-1},
+                        {'payment_person':'p0'},{'payment_input':None}):
+            await self.context().set_data({**before,**changes})
+            invalid = await self.context().get_data()
+            await self.message('1')
+            self.assertEqual(await self.context().get_data(),invalid)
+        await self.context().set_data(before)
+        started = before['payment_input']['started_update_id']
+        self.assertEqual(await self.message('1',update_id=started-1),[])
+        self.assertEqual(await self.message('1',reply_to=1),[])
+        self.assertEqual(await self.context().get_data(),before)
+        message_id = next(self.ids)
+        await self.message('1',message_id=message_id)
+        payer_state = await self.context().get_data()
+        await self.message('2')  # Text cannot change the draft during payer selection.
+        self.assertEqual(await self.context().get_data(),payer_state)
+        await self.click('tip_who',0)
+        await self.click('tips')
+        fresh = await self.context().get_data()
+        await self.message('1',message_id=message_id)
+        self.assertEqual(await self.context().get_data(),fresh)
+        await self.click('payments')
+        await self.click('paid')
+        restaurant = await self.context().get_data()
+        await self.message('1',message_id=message_id)
+        self.assertEqual(await self.context().get_data(),restaurant)
+
+    async def test_tip_callbacks_reject_foreign_stale_forged_and_missing_drafts(self):
+        await self.payment_ready()
+        old = self.code('tips')
+        await self.callback(old)
+        await self.message('1')
+        before = await self.context().get_data()
+        self.assertEqual(await self.context().get_state(),ExpenseAllocation.tip_payer.state)
+        await self.callback(old)
+        self.assertEqual(await self.context().get_data(),before)
+        who = self.code('tip_who')
+        await self.callback(who.replace(':tip_who:', ':pay_confirm:'))
+        self.assertEqual(await self.context().get_data(),before)
+        self.assertFalse((await self.plan()).settlement_confirmed)
+        for user,chat in ((43,42),(42,43)):
+            await self.context(user,chat).set_data(before)
+            await self.context(user,chat).set_state(ExpenseAllocation.tip_payer)
+            await self.callback(who,user=user,chat=chat)
+            self.assertEqual(await self.context(user,chat).get_data(),before)
+        await self.callback(who.rsplit(':',1)[0]+':999')
+        self.assertEqual(await self.context().get_data(),before)
+        for changes in ({'tip_draft_token':'old-receipt'},{'tip_draft_amount':None},{'tip_draft_amount':'0'}):
+            await self.context().set_data({**before,**changes})
+            invalid = await self.context().get_data()
+            await self.callback(who)
+            self.assertEqual(await self.context().get_data(),invalid)
+        await self.context().set_data(before)
+        await asyncio.gather(self.callback(who),self.callback(who))
+        self.assertEqual((await self.plan()).tip_amount,'1.00')
+        self.assertEqual((await self.plan()).tip_payer_id,'p0')
+
+    async def test_tip_edit_failures_roll_back_open_amount_payer_and_cancel(self):
+        await self.payment_ready()
+        await self.enter_payment(0,'9')
+        await self.enter_tips('1',2)
+        await self.click('pay_confirm')
+        error = TelegramBadRequest(method=EditMessageText(chat_id=42,message_id=self.menu_message_id,text='Test'),
+                                 message='Bad Request: message cannot be edited')
+        before = await self.context().get_data()
+        self.edit_error = error
+        await self.click('tips')
+        self.assertEqual(await self.context().get_data(),before)
+        self.assertEqual(await self.context().get_state(),ExpenseAllocation.payments.state)
+        self.edit_error = None
+        await self.click('tips')
+        before = await self.context().get_data()
+        self.edit_error = error
+        message_id = next(self.ids)
+        await self.message('2',message_id=message_id)
+        after = await self.context().get_data()
+        for key in before.keys()-{'payment_last_message_id','payment_last_update_id'}:
+            self.assertEqual(after[key],before[key])
+        self.assertEqual(await self.context().get_state(),ExpenseAllocation.tip_amount.state)
+        self.edit_error = None
+        await self.message('2',message_id=message_id)
+        self.assertEqual(await self.context().get_data(),after)
+        await self.message('2')
+        before = await self.context().get_data()
+        who = self.code('tip_who',1)
+        cancel = self.code('payments')
+        self.edit_error = error
+        for callback in (who,cancel):
+            await self.callback(callback)
+            self.assertEqual(await self.context().get_data(),before)
+            self.assertEqual(await self.context().get_state(),ExpenseAllocation.tip_payer.state)
+            self.assertTrue((await self.plan()).settlement_confirmed)
+        self.edit_error = None
+        self.assert_single_edit(await self.callback(who),self.menu_message_id)
+        self.assertEqual((await self.plan()).tip_amount,'2.00')
+        self.assertEqual((await self.plan()).tip_payer_id,'p1')
+        self.assertFalse((await self.plan()).settlement_confirmed)
+
+    async def test_zero_tips_edit_failure_restores_saved_amount_and_confirmation(self):
+        await self.payment_ready()
+        await self.enter_payment(0,'9')
+        await self.enter_tips('1',2)
+        await self.click('pay_confirm')
+        await self.click('tips')
+        before = (await self.plan()).model_dump()
+        self.edit_error = TelegramBadRequest(method=EditMessageText(chat_id=42,message_id=self.menu_message_id,text='Test'),
+                                             message='Bad Request: message cannot be edited')
+        await self.message('0')
+        self.assertEqual((await self.plan()).model_dump(),before)
+        self.assertEqual(await self.context().get_state(),ExpenseAllocation.tip_amount.state)
+        self.edit_error = None
+        await self.message('0')
+        self.assertEqual((await self.plan()).tip_amount,'0.00')
+        self.assertIsNone((await self.plan()).tip_payer_id)
+
+    async def test_tip_payer_pages_and_reallocation_keep_saved_tips(self):
+        await self.payment_ready(people=11)
+        await self.click('tips')
+        await self.message('0.01')
+        stale = self.code('tip_who',0)
+        self.assert_single_edit(await self.click('tips_page',1),self.menu_message_id)
+        before = await self.context().get_data()
+        await self.callback(stale)
+        self.assertEqual(await self.context().get_data(),before)
+        await self.click('tip_who',10)
+        await self.click('split_back')
+        await self.click('reopen')
+        plan = await self.plan()
+        self.assertEqual(plan.tip_amount,'0.01')
+        self.assertEqual(plan.tip_payer_id,'p10')
+        self.assertFalse(plan.settlement_confirmed)
+
+    async def test_missing_tip_payer_and_restaurant_double_counting_block_confirmation(self):
+        await self.payment_ready()
+        await self.enter_payment(0,'9')
+        plan = await self.plan()
+        await self.context().update_data(allocation={**plan.model_dump(),'tip_amount':'1.00'})
+        await self.click('split_back')
+        methods = await self.click('payments')
+        self.assertIn('Не выбран участник',self.text(methods))
+        self.assertNotIn(' → ',self.text(methods))
+        await self.click('pay_confirm')
+        self.assertFalse((await self.plan()).settlement_confirmed)
+        await self.click('tip_payer_edit')
+        await self.click('tip_who',1)
+        await self.enter_payment(0,'10')
+        methods = await self.click('pay_confirm')
+        self.assertIn('не подтверждён',self.text(methods))
+        self.assertFalse((await self.plan()).settlement_confirmed)
+
+    async def test_confirmed_ruble_display_survives_recognition_confirmation(self):
+        for raw,currency,expected in (('Итого 100.00 ₽',None,'₽'),('Чай 100.00',None,'(валюта не определена)'),
+                                      ('Total 100.00 ₽','USD','USD')):
+            with self.subTest(raw=raw,currency=currency):
+                await self.message('/start')
+                self.recognize.return_value = RecognizedReceipt(readable=True,
+                    items=[{'name':'Тестовая позиция','quantity':'1','unit_price':None,'total_price':'100.00'}],
+                    receipt_total='100.00',currency=currency,raw_text=raw)
+                await self.callback('split_check')
+                await self.send({'message':{'message_id':next(self.ids),'date':1,
+                    'from':{'id':42,'is_bot':False,'first_name':'Test'},'chat':{'id':42,'type':'private'},
+                    'photo':[{'file_id':'stub','file_unique_id':'stub','width':100,'height':100}]}})
+                await self.callback('confirm_recognition')
+                data = await self.context().get_data()
+                self.assertEqual(data['currency'],currency)
+                self.assertEqual((await self.plan()).currency,currency)
+                await self.click('begin')
+                methods = await self.click('overview')
+                self.assertIn('100.00 '+expected,self.text(methods))

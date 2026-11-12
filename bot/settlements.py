@@ -4,7 +4,7 @@ from decimal import Decimal, localcontext
 
 from pydantic import BaseModel, ConfigDict
 
-from bot.expense_split import Allocation, PaymentAmount, participant_totals
+from bot.expense_split import Allocation, PaymentAmount, participant_totals, split_amount
 
 
 class Transfer(BaseModel):
@@ -35,11 +35,39 @@ def set_payment(plan: Allocation, person_id: str, value: str) -> Allocation:
     return Allocation.model_validate(data)
 
 
-def balances(plan: Allocation) -> dict[str, Decimal]:
+def set_tips(plan: Allocation, value: str, payer_id: str | None) -> Allocation:
+    amount = parse_payment(value)
+    if (not plan.completed or amount is None or not plan.participants
+            or Decimal(amount) > 0 and payer_id not in {p.id for p in plan.participants}):
+        raise ValueError('Invalid tips or payer')
+    return Allocation.model_validate({**plan.model_dump(), 'tip_amount': amount,
+        'tip_payer_id': payer_id if Decimal(amount) > 0 else None, 'settlement_confirmed': False})
+
+
+def tip_shares(plan: Allocation) -> dict[str, Decimal]:
+    return split_amount(plan.tip_amount, [p.id for p in plan.participants]) if plan.participants else {}
+
+
+def expense_shares(plan: Allocation) -> dict[str, Decimal]:
     owed = participant_totals(plan)
+    tips = tip_shares(plan)
     with localcontext() as context:
         context.prec = 32
-        return {person.id: Decimal(plan.payments.get(person.id, '0')) - owed[person.id]
+        return {p.id: owed[p.id] + tips[p.id] for p in plan.participants}
+
+
+def paid_by(plan: Allocation, person_id: str) -> Decimal:
+    with localcontext() as context:
+        context.prec = 32
+        return Decimal(plan.payments.get(person_id, '0')) + (
+            Decimal(plan.tip_amount) if plan.tip_payer_id == person_id else Decimal(0))
+
+
+def balances(plan: Allocation) -> dict[str, Decimal]:
+    owed = expense_shares(plan)
+    with localcontext() as context:
+        context.prec = 32
+        return {person.id: paid_by(plan, person.id) - owed[person.id]
                 for person in plan.participants}
 
 
@@ -51,6 +79,8 @@ def settlement_issues(plan: Allocation) -> list[str]:
         issues.append('receipt_mismatch')
     if plan.paid_total != plan.items_total:
         issues.append('payments_mismatch')
+    if Decimal(plan.tip_amount) > 0 and plan.tip_payer_id is None:
+        issues.append('tips_unpaid')
     return issues
 
 
