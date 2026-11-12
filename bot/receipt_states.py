@@ -22,3 +22,11 @@ class ReceiptEditor(StatesGroup):
     quantity = State()
     price = State()
     delete = State()
+
+
+class ExpenseAllocation(StatesGroup):
+    overview = State()
+    name = State()
+    items = State()
+    item = State()
+    done = State()

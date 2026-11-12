@@ -311,8 +311,9 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                          "Итоговый чек:\n\n1. Пицца × 2 — 1800 ₽\n"
                          "2. Сок × 3 — 0.3 ₽\n3. Вода × 1 — 99.9 ₽\n\nИтого: 1900.2 ₽")
         self.assertIsNotNone(methods[-1].reply_markup)
-        self.assertIsNone(await self.context().get_state())
-        self.assertEqual(await self.context().get_data(), {})
+        self.assertEqual(await self.context().get_state(), ReceiptInput.confirmed.state)
+        self.assertEqual(len((await self.context().get_data())['allocation']['items']), 3)
+        self.assertTrue(methods[-1].reply_markup.inline_keyboard[0][0].callback_data.startswith('sp:'))
 
     async def test_invalid_inputs_keep_current_step(self) -> None:
         await self.begin_receipt()
@@ -458,7 +459,8 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         methods = await self.dispatch(self.callback("finish_receipt"))
         self.assertIn("Итоговый чек:", methods[-1].text)
         self.assertIn("Итого: 1800 ₽", methods[-1].text)
-        self.assertEqual(await self.context().get_data(), {})
+        self.assertEqual(await self.context().get_state(), ReceiptInput.confirmed.state)
+        self.assertEqual((await self.context().get_data())['allocation']['items'][0]['amount'], '1800.00')
 
     async def test_cancel_after_photo_clears_scenario(self) -> None:
         await self.dispatch(self.callback("split_check"))
