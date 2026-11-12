@@ -14,3 +14,10 @@ def load_bot_token() -> str:
     if not token:
         raise ValueError("Укажите BOT_TOKEN в файле .env или в переменных окружения.")
     return token
+
+
+def receipt_db_path() -> Path:
+    """Stable path across deployments; persistent volume recommended in containers."""
+    load_dotenv(ENV_FILE, override=False)
+    configured = os.getenv("RECEIPT_DB_PATH", "").strip()
+    return Path(configured).expanduser() if configured else Path.home() / ".local/share/split-check-bot/receipts.sqlite3"

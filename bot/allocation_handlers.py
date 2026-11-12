@@ -431,6 +431,7 @@ async def _allocation_callback(callback: CallbackQuery, state: FSMContext, event
             await callback.answer('В одном чеке можно добавить до 30 участников.')
             return
         await state.set_state(ExpenseAllocation.name)
+        await state.update_data(allocation_name_floor=event_update.update_id if event_update else None)
         button = await buttons(state)
         await render(message, state, 'Введите имя участника (до 60 символов).',
                      InlineKeyboardMarkup(inline_keyboard=[[button('↩️ Назад', 'overview')]]))
@@ -499,13 +500,15 @@ async def _allocation_callback(callback: CallbackQuery, state: FSMContext, event
     return True
 
 
-async def _participant_name(message: Message, state: FSMContext):
+async def _participant_name(message: Message, state: FSMContext, event_update: Update | None = None):
     data = await state.get_data()
     plan = Allocation.model_validate(data['allocation'])
     if (message.from_user is None or message.from_user.id != plan.owner_user_id
             or message.chat.id != plan.owner_chat_id):
         return
-    if message.message_id in data.get('allocation_seen_messages', []):
+    if (message.message_id in data.get('allocation_seen_messages', [])
+            or type(data.get('allocation_name_floor')) is not int or event_update is None
+            or event_update.update_id <= data['allocation_name_floor']):
         return
     try:
         plan = add_participant(plan, message.text or '')
@@ -594,8 +597,8 @@ async def text_transaction(message, state, handler, **kwargs):
 
 
 @router.message(ExpenseAllocation.name)
-async def participant_name(message: Message, state: FSMContext):
-    await text_transaction(message, state, _participant_name)
+async def participant_name(message: Message, state: FSMContext, event_update: Update | None = None):
+    await text_transaction(message, state, _participant_name, event_update=event_update)
 
 
 @router.message(ExpenseAllocation.payment_amount)

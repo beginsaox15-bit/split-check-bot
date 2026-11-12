@@ -240,6 +240,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assert_buttons(method, [
             [("🧾 Разделить чек", "split_check")],
+            [("📂 Мои чеки", "my_receipts")],
             [("👥 Мои компании", "my_groups")],
             [("ℹ️ Как это работает", "how_it_works")],
         ])
@@ -436,6 +437,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("нажмите «🧾 Разделить чек»", methods[0].text)
         self.assert_buttons(methods[0], [
             [("🧾 Разделить чек", "split_check")],
+            [("📂 Мои чеки", "my_receipts")],
             [("👥 Мои компании", "my_groups")],
             [("ℹ️ Как это работает", "how_it_works")],
         ])
@@ -512,8 +514,10 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         # Старое повторное подтверждение не дублирует позиции.
         await self.dispatch(self.callback("confirm_recognition"))
         self.assertEqual(await self.context().get_data(), data)
-        await self.dispatch(self.callback("cancel_receipt"))
-        self.assertEqual(await self.context().get_data(), {})
+        # Old input buttons cannot discard a confirmed/restored calculation.
+        methods = await self.dispatch(self.callback("cancel_receipt"))
+        self.assertIn("устарело", methods[-1].text)
+        self.assertEqual(await self.context().get_data(), data)
 
     async def test_mismatched_recognition_total_warns_user(self) -> None:
         self.recognize.return_value.receipt_total = "2400.00"

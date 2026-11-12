@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from bot.config import load_bot_token
+from bot.config import load_bot_token, receipt_db_path
 
 
 class ConfigTests(unittest.TestCase):
@@ -32,3 +32,14 @@ class ConfigTests(unittest.TestCase):
         self.env_file.write_text('BOT_TOKEN="   "\n', encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "Укажите BOT_TOKEN"):
             load_bot_token()
+
+
+class ReceiptPathTests(unittest.TestCase):
+    def test_explicit_database_path(self):
+        with patch.dict(os.environ, {'RECEIPT_DB_PATH': '/tmp/private-history/receipts.sqlite3'}), \
+                patch('bot.config.load_dotenv'):
+            self.assertEqual(receipt_db_path(), Path('/tmp/private-history/receipts.sqlite3'))
+
+    def test_default_path_is_outside_checkout_and_stable(self):
+        with patch.dict(os.environ, {'RECEIPT_DB_PATH': ''}), patch('bot.config.load_dotenv'):
+            self.assertEqual(receipt_db_path(), Path.home() / '.local/share/split-check-bot/receipts.sqlite3')
