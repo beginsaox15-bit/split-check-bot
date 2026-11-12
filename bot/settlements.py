@@ -4,7 +4,7 @@ from decimal import Decimal, localcontext
 
 from pydantic import BaseModel, ConfigDict
 
-from bot.expense_split import Allocation, PaymentAmount, participant_totals, split_amount
+from bot.expense_split import Allocation, PaymentAmount, restaurant_shares, split_amount
 
 
 class Transfer(BaseModel):
@@ -44,12 +44,20 @@ def set_tips(plan: Allocation, value: str, payer_id: str | None) -> Allocation:
         'tip_payer_id': payer_id if Decimal(amount) > 0 else None, 'settlement_confirmed': False})
 
 
+def set_discount(plan: Allocation, value: str) -> Allocation:
+    amount = parse_payment(value)
+    if not plan.completed or amount is None or Decimal(amount) > plan.items_total:
+        raise ValueError('Invalid discount')
+    return Allocation.model_validate({**plan.model_dump(), 'discount_amount': amount,
+                                     'settlement_confirmed': False})
+
+
 def tip_shares(plan: Allocation) -> dict[str, Decimal]:
     return split_amount(plan.tip_amount, [p.id for p in plan.participants]) if plan.participants else {}
 
 
 def expense_shares(plan: Allocation) -> dict[str, Decimal]:
-    owed = participant_totals(plan)
+    owed = restaurant_shares(plan)
     tips = tip_shares(plan)
     with localcontext() as context:
         context.prec = 32
@@ -77,7 +85,7 @@ def settlement_issues(plan: Allocation) -> list[str]:
         issues.append('allocation_incomplete')
     if plan.mismatch:
         issues.append('receipt_mismatch')
-    if plan.paid_total != plan.items_total:
+    if plan.paid_total != plan.restaurant_total:
         issues.append('payments_mismatch')
     if Decimal(plan.tip_amount) > 0 and plan.tip_payer_id is None:
         issues.append('tips_unpaid')

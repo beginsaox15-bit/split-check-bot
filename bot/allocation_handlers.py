@@ -7,11 +7,12 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 
-from bot.expense_split import Allocation, add_participant, assign_item, complete, participant_totals, snapshot
+from bot.expense_split import (Allocation, add_participant, assign_item, complete, discount_shares,
+                               participant_totals, restaurant_shares, snapshot)
 from bot.receipt_states import ExpenseAllocation, ReceiptInput
 from bot.allocation_screen import ScreenEditError, render
 from bot.settlements import (balances, confirm_settlement, expense_shares, paid_by, parse_payment,
-                             set_payment, set_tips, settlement_issues, tip_shares, transfers)
+                             set_discount, set_payment, set_tips, settlement_issues, tip_shares, transfers)
 from bot.payment_input import accepts_message, new_session
 from bot.currency import symbol
 
@@ -58,18 +59,27 @@ async def prepare(state, *, user_id, chat_id):
 
 def overview_text(plan):
     totals = participant_totals(plan)
+    discounts = discount_shares(plan) if plan.completed else None
+    after = restaurant_shares(plan) if plan.completed else None
     text = 'Распределение завершено ✅' if plan.completed else 'Предварительное распределение'
     text += '\n\nУчастники:'
     for index, person in enumerate(plan.participants, 1):
         text += f'\n{index}. {person.name} — {amount(totals[person.id], plan)}'
+        if Decimal(plan.discount_amount) > 0 and plan.completed:
+            text += f'; скидка {amount(discounts[person.id], plan)}; после скидки {amount(after[person.id], plan)}'
     if not plan.participants:
         text += '\nПока никого нет. Добавьте участников по одному.'
     text += f'\n\nСумма позиций: {amount(plan.items_total, plan)}'
+    if Decimal(plan.discount_amount) > 0:
+        text += f'\nОбщая скидка: {amount(plan.discount_amount, plan)}'
+        text += f'\nРесторан после скидки: {amount(plan.restaurant_total, plan)}'
+        if not plan.completed:
+            text += '\nДоли выше указаны до скидки. Скидка распределится после назначения всех позиций.'
     if plan.gross_total is not None:
-        text += f'\nПолная сумма чека: {amount(plan.gross_total, plan)}'
+        label = 'Считано с чека (gross_total)' if Decimal(plan.discount_amount) > 0 else 'Полная сумма чека'
+        text += f'\n{label}: {amount(plan.gross_total, plan)}'
     if plan.mismatch:
-        text += '\n⚠️ Сумма позиций не совпадает с общей суммой чека. '
-        text += 'Доли рассчитаны по позициям; проверьте чек. Суммы не исправлялись.'
+        text += receipt_warning(plan)
     if plan.prepayment is not None:
         text += f'\nПредоплата по чеку: {amount(plan.prepayment, plan)}'
     if plan.amount_due is not None:
@@ -83,6 +93,22 @@ def overview_text(plan):
             text += f'\n#{index}. {item.name} × {item.quantity} — {amount(item.amount, plan)}'
     text += '\n\nОбщие позиции делятся поровну. Остаток копеек получают первые выбранные участники в порядке добавления.'
     return text
+
+
+def receipt_warning(plan):
+    if Decimal(plan.discount_amount) == 0:
+        return '\n⚠️ Сумма позиций не совпадает с общей суммой чека. Проверьте исходный чек. Суммы не исправлялись.'
+    reasons = {
+        'unexplained_total': 'прочитанный итог не равен сумме позиций ни до, ни после скидки',
+        'conflicting_totals': 'прочитанные общие итоги различаются',
+        'suspect_prepayment': 'распознанная предоплата помечена как неподтверждённая',
+        'prepayment_exceeds_restaurant': 'предоплата превышает ресторанный счёт после скидки',
+        'ambiguous_due_without_prepayment': 'остаток отличается от счёта, но предоплата неизвестна',
+        'payment_totals_mismatch': 'предоплата и остаток не сходятся со счётом после скидки',
+    }
+    return ('\n⚠️ Итоги OCR противоречат расчёту со скидкой или неоднозначны: '
+            + '; '.join(reasons[issue] for issue in plan.receipt_total_issues)
+            + '. Проверьте чек и введённую скидку; исходные суммы не исправлялись.')
 
 
 async def show_overview(message, state, plan):
@@ -152,7 +178,8 @@ async def show_selection(message, state, plan, index, selected):
 
 
 def payments_text(plan):
-    restaurant = participant_totals(plan)
+    before, discounts = participant_totals(plan), discount_shares(plan)
+    restaurant = restaurant_shares(plan)
     tips = tip_shares(plan)
     owed = expense_shares(plan)
     net = balances(plan)
@@ -166,7 +193,11 @@ def payments_text(plan):
                  f'\nЧаевые: доля {amount(tips[person.id], plan)}; оплачено {amount(tip_paid, plan)}'
                  f'\nВсего по расходам: {amount(owed[person.id], plan)}; оплачено {amount(paid_by(plan, person.id), plan)}'
                  f'\nБаланс: {amount(net[person.id], plan)}')
-    text += f'\n\nРесторанный счёт (сумма позиций): {amount(plan.items_total, plan)}'
+        if Decimal(plan.discount_amount) > 0:
+            text += f'\nДо скидки: {amount(before[person.id], plan)}; скидка участника: {amount(discounts[person.id], plan)}'
+    text += f'\n\nСумма позиций до скидки: {amount(plan.items_total, plan)}'
+    text += f'\nОбщая скидка: {amount(plan.discount_amount, plan)}'
+    text += f'\nРесторан после скидки: {amount(plan.restaurant_total, plan)}'
     text += f'\nРесторанные оплаты: {amount(plan.paid_total, plan)}'
     text += f'\nЧаевые: {amount(plan.tip_amount, plan)}'
     if Decimal(plan.tip_amount) > 0:
@@ -174,9 +205,14 @@ def payments_text(plan):
         text += f'\nЧаевые оплатил(а): {payer}'
     text += f'\nОбщие расходы: {amount(plan.expenses_total, plan)}'
     if plan.gross_total is not None:
-        text += f'\nПолная сумма чека: {amount(plan.gross_total, plan)}'
+        label = 'Считано с чека (gross_total)' if Decimal(plan.discount_amount) > 0 else 'Полная сумма чека'
+        text += f'\n{label}: {amount(plan.gross_total, plan)}'
+    if Decimal(plan.discount_amount) > 0 and plan.receipt_total is not None and plan.receipt_total != plan.gross_total:
+        text += f'\nСчитано с чека (receipt_total): {amount(plan.receipt_total, plan)}'
     if plan.prepayment is not None:
         text += f'\nПредоплата по чеку: {amount(plan.prepayment, plan)}'
+    if plan.amount_due is not None:
+        text += f'\nОстаток по чеку: {amount(plan.amount_due, plan)}'
     text += ('\nПредоплата автоматически не добавляется. Включите её ровно один раз в общую '
              'ресторанную оплату внёсшего её участника. Чаевые в ресторанные оплаты не включайте. '
              'Переводы между участниками в эти оплаты не включайте.')
@@ -184,9 +220,9 @@ def payments_text(plan):
     if 'allocation_incomplete' in issues:
         text += '\n⚠️ Сначала завершите распределение всех позиций.'
     if 'receipt_mismatch' in issues:
-        text += '\n⚠️ Сумма позиций не совпадает с общей суммой чека. Проверьте исходный чек.'
+        text += receipt_warning(plan)
     if 'payments_mismatch' in issues:
-        text += '\n⚠️ Сумма оплат не совпадает с суммой распределённых позиций. Исправьте оплаты.'
+        text += '\n⚠️ Сумма оплат не совпадает с ресторанным счётом после скидки. Исправьте оплаты; чаевые сюда не входят.'
     if 'tips_unpaid' in issues:
         text += '\n⚠️ Не выбран участник, оплативший чаевые.'
     if issues:
@@ -219,6 +255,7 @@ async def show_payments(message, state, plan, page=0):
     if navigation:
         rows.append(navigation)
     rows.append([button('💰 Изменить чаевые' if Decimal(plan.tip_amount) else '💰 Добавить чаевые', 'tips')])
+    rows.append([button('🏷️ Изменить скидку' if Decimal(plan.discount_amount) else '🏷️ Добавить скидку', 'discount')])
     if Decimal(plan.tip_amount) > 0:
         rows.append([button('✏️ Кто оплатил чаевые', 'tip_payer_edit')])
     if not plan.settlement_confirmed:
@@ -258,6 +295,24 @@ async def show_tip_input(message, state, plan, update_id, *, error=False):
         button('↩️ Назад без сохранения', 'payments')]]))
     data = await state.get_data()
     await state.update_data(payment_input=new_session(data, None, update_id, message.message_id, kind='tip'))
+
+
+async def show_discount_input(message, state, plan, update_id, *, error=False):
+    await state.set_state(ExpenseAllocation.discount_amount)
+    await state.update_data(payment_person=None, payment_input=None)
+    button = await buttons(state)
+    text = ('Нужна неотрицательная сумма с максимум двумя знаками после запятой, не больше суммы позиций.\n\n'
+            if error else '')
+    text += (f'Скидка сейчас: {amount(plan.discount_amount, plan)}. '
+             f'Сумма позиций до скидки: {amount(plan.items_total, plan)}. '
+             'Отправьте общую скидку обычным текстовым сообщением; 0 удаляет скидку. '
+             'Она распределится пропорционально ресторанным долям, с точным распределением копеек. '
+             'Ввод подтверждает скидку и сбрасывает подтверждение переводов. '
+             'Чаевые и исходные суммы OCR не изменяются; скидка из разницы итогов автоматически не вычисляется.')
+    await render(message, state, text, InlineKeyboardMarkup(inline_keyboard=[[
+        button('↩️ Назад без сохранения', 'payments', (await state.get_data()).get('payment_page', 0))]]))
+    data = await state.get_data()
+    await state.update_data(payment_input=new_session(data, None, update_id, message.message_id, kind='discount'))
 
 
 async def show_tip_payers(message, state, plan, draft, page=0):
@@ -317,9 +372,10 @@ async def _allocation_callback(callback: CallbackQuery, state: FSMContext, event
                      ExpenseAllocation.items.state, ExpenseAllocation.item.state},
         'back': {ExpenseAllocation.overview.state},
         'payments': {ExpenseAllocation.done.state, ExpenseAllocation.payments.state, ExpenseAllocation.payment_amount.state,
-                     ExpenseAllocation.tip_amount.state, ExpenseAllocation.tip_payer.state},
+                     ExpenseAllocation.tip_amount.state, ExpenseAllocation.tip_payer.state, ExpenseAllocation.discount_amount.state},
         'paid': {ExpenseAllocation.payments.state}, 'pay_confirm': {ExpenseAllocation.payments.state},
         'tips': {ExpenseAllocation.payments.state}, 'tip_payer_edit': {ExpenseAllocation.payments.state},
+        'discount': {ExpenseAllocation.payments.state},
         'tips_page': {ExpenseAllocation.tip_payer.state}, 'tip_who': {ExpenseAllocation.tip_payer.state},
         'split_back': {ExpenseAllocation.payments.state},
     }
@@ -333,14 +389,14 @@ async def _allocation_callback(callback: CallbackQuery, state: FSMContext, event
     if action == 'finish' and plan.unassigned:
         await callback.answer(f'Остались нераспределённые позиции: {len(plan.unassigned)}.', show_alert=True)
         return
-    if action in {'payments', 'paid', 'pay_confirm', 'tips', 'tip_payer_edit', 'tips_page', 'tip_who'} and not plan.completed:
+    if action in {'payments', 'paid', 'pay_confirm', 'tips', 'tip_payer_edit', 'tips_page', 'tip_who', 'discount'} and not plan.completed:
         await callback.answer('Сначала завершите распределение позиций.')
         return
-    if action in {'paid', 'tips'} and event_update is None:
+    if action in {'paid', 'tips', 'discount'} and event_update is None:
         await callback.answer('Откройте ввод оплаты заново.')
         return
     if action == 'pay_confirm' and settlement_issues(plan):
-        await callback.answer('Расчёт не подтверждён: проверьте ресторанные оплаты, позиции, общий итог и плательщика чаевых.', show_alert=True)
+        await callback.answer('Расчёт не подтверждён: проверьте ресторанные оплаты, позиции, скидку, итоги OCR и плательщика чаевых.', show_alert=True)
         return
     if action == 'tip_payer_edit' and Decimal(plan.tip_amount) <= 0:
         await callback.answer('Сначала укажите сумму чаевых.')
@@ -420,6 +476,8 @@ async def _allocation_callback(callback: CallbackQuery, state: FSMContext, event
         await show_payment_input(message, state, plan, index, event_update.update_id)
     elif action == 'tips':
         await show_tip_input(message, state, plan, event_update.update_id)
+    elif action == 'discount':
+        await show_discount_input(message, state, plan, event_update.update_id)
     elif action == 'tip_payer_edit':
         await show_tip_payers(message, state, plan, plan.tip_amount)
     elif action == 'tips_page':
@@ -493,6 +551,18 @@ async def _tip_amount(message: Message, state: FSMContext, event_update: Update)
         await show_tip_payers(message, state, plan, value)
 
 
+async def _discount_amount(message: Message, state: FSMContext, event_update: Update):
+    data = await state.get_data()
+    plan = Allocation.model_validate(data['allocation'])
+    try:
+        plan = set_discount(plan, message.text or '')
+    except ValueError:
+        await show_discount_input(message, state, plan, event_update.update_id, error=True)
+        return
+    await save(state, plan)
+    await show_payments(message, state, plan, data.get('payment_page', 0))
+
+
 @router.callback_query(F.data.startswith('sp:'))
 async def allocation_callback(callback: CallbackQuery, state: FSMContext, event_update: Update | None = None):
     before = deepcopy(await state.get_data())
@@ -530,6 +600,7 @@ async def participant_name(message: Message, state: FSMContext):
 
 @router.message(ExpenseAllocation.payment_amount)
 @router.message(ExpenseAllocation.tip_amount)
+@router.message(ExpenseAllocation.discount_amount)
 async def payment_amount(message: Message, state: FSMContext, event_update: Update | None = None):
     data = await state.get_data()
     try:
@@ -545,7 +616,8 @@ async def payment_amount(message: Message, state: FSMContext, event_update: Upda
     # an amount later, even if Telegram rejects an edit and the business state rolls back.
     await state.update_data(payment_last_message_id=message.message_id,
                             payment_last_update_id=event_update.update_id)
-    handler = _tip_amount if await state.get_state() == ExpenseAllocation.tip_amount.state else _payment_amount
+    handler = {ExpenseAllocation.tip_amount.state: _tip_amount,
+               ExpenseAllocation.discount_amount.state: _discount_amount}.get(await state.get_state(), _payment_amount)
     await text_transaction(message, state, handler, event_update=event_update)
 
 

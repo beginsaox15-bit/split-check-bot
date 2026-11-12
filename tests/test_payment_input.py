@@ -85,3 +85,14 @@ class PlainPaymentInputTests(unittest.TestCase):
         self.assertFalse(self.accepts(data=data,state_name=ExpenseAllocation.tip_payer.state))
         data['payment_person'] = data['payment_input']['person_id'] = 'p0'
         self.assertFalse(self.accepts(data=data,state_name=ExpenseAllocation.tip_amount.state))
+
+    def test_discount_input_is_bound_to_its_own_money_session(self):
+        data = deepcopy(self.data)
+        data['payment_person'] = None
+        data['payment_input'] = new_session(data, None, 100, 50, kind='discount')
+        self.assertTrue(self.accepts(data=data,state_name=ExpenseAllocation.discount_amount.state))
+        for state in (ExpenseAllocation.payment_amount.state,ExpenseAllocation.tip_amount.state):
+            self.assertFalse(self.accepts(data=data,state_name=state))
+        self.assertFalse(self.accepts(state_name=ExpenseAllocation.discount_amount.state))
+        data['payment_person'] = data['payment_input']['person_id'] = 'p0'
+        self.assertFalse(self.accepts(data=data,state_name=ExpenseAllocation.discount_amount.state))
