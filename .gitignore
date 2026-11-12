@@ -226,3 +226,12 @@ work/
 /artifacts/receipt_benchmark/
 /tests/fixtures/receipts/local/
 /tests/fixtures/receipts/expected/local/
+
+# Local private receipt history (including SQLite sidecars)
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite*
+*.db-journal
+*.db-wal
+*.db-shm

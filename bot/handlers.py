@@ -9,7 +9,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from bot.receipt import parse_price, parse_quantity, receipt_lines
 from bot.receipt_states import ManualReceipt, ReceiptInput, ReceiptEditor
 from bot.receipt_view import RECOGNITION_MENU, answer_in_parts, show_recognition
-from bot import receipt_editor, allocation_handlers
+from bot import receipt_editor, allocation_handlers, saved_receipts
+from bot.allocation_screen import render
 from bot.currency import receipt_currency
 from bot.services.receipt_models import (
     LowQualityReceipt, RecognizedReceipt, ReceiptItem, TesseractLanguagesUnavailable,
@@ -30,6 +31,7 @@ START_TEXT = (
 
 START_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🧾 Разделить чек", callback_data="split_check")],
+    [InlineKeyboardButton(text="📂 Мои чеки", callback_data="my_receipts")],
     [InlineKeyboardButton(text="👥 Мои компании", callback_data="my_groups")],
     [InlineKeyboardButton(text="ℹ️ Как это работает", callback_data="how_it_works")],
 ])
@@ -64,13 +66,16 @@ RECEIPT_MENU = InlineKeyboardMarkup(inline_keyboard=[
 
 
 async def show_receipt(message: Message, items: list[dict], *, finished: bool = False,
-                       finished_menu: InlineKeyboardMarkup | None = None) -> None:
+                       finished_menu: InlineKeyboardMarkup | None = None, state: FSMContext | None = None) -> None:
     lines, total = receipt_lines(items)
     heading = "Итоговый чек:" if finished else f"Добавлено ✅\n\n{lines[-1]}\n\nТекущий чек:"
     text = heading + "\n\n" + "\n".join(
         f"{index}. {line}" for index, line in enumerate(lines, 1)
     ) + f"\n\nИтого: {total} ₽"
-    await answer_in_parts(message, text, (finished_menu or START_MENU) if finished else RECEIPT_MENU)
+    if finished and state is not None:
+        await render(message, state, text, finished_menu or START_MENU)
+    else:
+        await answer_in_parts(message, text, (finished_menu or START_MENU) if finished else RECEIPT_MENU)
 
 
 async def recognize_last_photo(message: Message, state: FSMContext) -> None:
@@ -266,7 +271,7 @@ async def confirm_recognition(callback: CallbackQuery, state: FSMContext) -> Non
         await state.set_state(ReceiptInput.confirmed)
         menu = await allocation_handlers.prepare(state, user_id=callback.from_user.id,
                                                  chat_id=callback.message.chat.id)
-        await callback.message.answer("Чек подтверждён ✅", reply_markup=menu)
+        await render(callback.message, state, "Чек подтверждён ✅", menu)
 
 
 @router.callback_query(F.data == "edit_recognition")
@@ -404,16 +409,21 @@ async def finish_receipt(callback: CallbackQuery, state: FSMContext) -> None:
                                           'Чек сохранён; проверьте ввод или начните заново через /start.')
             return
         await state.set_state(ReceiptInput.confirmed)
-        await show_receipt(callback.message, data["items"], finished=True, finished_menu=menu)
+        await show_receipt(callback.message, data["items"], finished=True, finished_menu=menu, state=state)
 
 
 @router.callback_query(F.data == "cancel_receipt")
 async def cancel_receipt(callback: CallbackQuery, state: FSMContext) -> None:
+    input_states = {s.state for group in (ManualReceipt, ReceiptEditor) for s in group.__all_states__}
+    if await state.get_state() not in input_states | {ReceiptInput.photo.state, ReceiptInput.review.state}:
+        await callback.answer('Меню устарело. Используйте текущий экран или /start.')
+        return
     await callback.answer()
     if isinstance(callback.message, Message):
         await state.clear()
         await callback.message.answer("Ввод отменён. Текущий чек очищен.", reply_markup=START_MENU)
 
 
+router.include_router(saved_receipts.router)
 router.include_router(receipt_editor.router)
 router.include_router(allocation_handlers.router)
