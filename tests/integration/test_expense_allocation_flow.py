@@ -97,13 +97,15 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
     def text(self, methods):
         return next(method.text for method in reversed(methods) if getattr(method, 'text', None) is not None)
 
-    async def message(self, text, message_id=None, reply_to=None):
+    async def message(self, text, message_id=None, reply_to=None, update_id=None):
         payload = {'message': {'message_id': message_id or next(self.ids), 'date': 1,
                                            'from': {'id': 42, 'is_bot': False, 'first_name': 'Test'},
                                            'chat': {'id': 42, 'type': 'private'}, 'text': text}}
         if reply_to is not None:
             payload['message']['reply_to_message'] = {'message_id': reply_to, 'date': 1,
                                                      'chat': {'id': 42, 'type': 'private'}, 'text': 'Payment prompt'}
+        if update_id is not None:
+            payload['update_id'] = update_id
         return await self.send(payload)
 
     def code(self, action, index=0):
@@ -327,8 +329,7 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def enter_payment(self, index, value):
         await self.click('paid', index)
-        prompt = (await self.context().get_data())['payment_prompt_id']
-        return await self.message(value, reply_to=prompt)
+        return await self.message(value)
 
     async def test_one_payer_and_confirmed_transfers(self):
         methods = await self.payment_ready()
@@ -391,23 +392,22 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_old_replies_duplicates_and_invalid_payment_input(self):
         await self.payment_ready()
         await self.click('paid')
-        old_prompt = (await self.context().get_data())['payment_prompt_id']
-        await self.message('0.001', reply_to=old_prompt)
+        original_session = (await self.context().get_data())['payment_input']
+        methods = await self.message('0.001')
+        self.assert_single_edit(methods, self.menu_message_id)
+        self.assertIn('Нужна неотрицательная', self.text(methods))
         self.assertEqual((await self.plan()).payments, {})
-        new_prompt = (await self.context().get_data())['payment_prompt_id']
-        self.assertNotEqual(old_prompt, new_prompt)
-        await self.message('9', reply_to=old_prompt)
-        await self.message('9')
+        fresh_session = (await self.context().get_data())['payment_input']
+        self.assertNotEqual(original_session['revision'], fresh_session['revision'])
+        await self.message('9', reply_to=1)  # Old ForceReply replies are not ordinary input.
         self.assertEqual((await self.plan()).payments, {})
-        await self.message('9', message_id=999, reply_to=new_prompt)
+        await self.message('9', message_id=999)
+        self.ids = itertools.count(1000)
         await self.click('paid', 1)
-        await self.message('9', message_id=999, reply_to=new_prompt)
-        self.assertEqual((await self.plan()).payments, {'p0': '9.00'})
-        await self.click('payments')
-        await self.click('paid', 1)
-        prompt = (await self.context().get_data())['payment_prompt_id']
-        await asyncio.gather(self.message('0', message_id=1001, reply_to=prompt),
-                             self.message('0', message_id=1001, reply_to=prompt))
+        before = await self.context().get_data()
+        await self.message('9', message_id=999)
+        self.assertEqual(await self.context().get_data(), before)
+        await asyncio.gather(self.message('0', message_id=2000), self.message('0', message_id=2000))
         self.assertEqual((await self.plan()).payments, {'p0': '9.00', 'p1': '0.00'})
 
     async def test_payment_callbacks_are_scoped_and_forged_indices_rejected(self):
@@ -460,13 +460,12 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.click('pay_confirm')
         before = (await self.plan()).model_dump()
         await self.click('paid', 0)
-        prompt = (await self.context().get_data())['payment_prompt_id']
         await self.click('payments')
         self.assertEqual((await self.plan()).model_dump(), before)
-        await self.message('8', reply_to=prompt)
+        await self.message('8')
         self.assertEqual((await self.plan()).model_dump(), before)
 
-    async def test_foreign_payment_reply_cannot_mutate_copied_context(self):
+    async def test_foreign_payment_text_cannot_mutate_copied_context(self):
         await self.payment_ready()
         await self.click('paid')
         before = await self.context().get_data()
@@ -476,9 +475,7 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
             await context.set_data(before)
             await self.send({'message': {'message_id': next(self.ids), 'date': 1,
                 'from': {'id': user, 'is_bot': False, 'first_name': 'Test'},
-                'chat': {'id': chat, 'type': 'private'}, 'text': '9',
-                'reply_to_message': {'message_id': before['payment_prompt_id'], 'date': 1,
-                                     'chat': {'id': chat, 'type': 'private'}, 'text': 'Prompt'}}})
+                'chat': {'id': chat, 'type': 'private'}, 'text': '9'}})
             self.assertEqual(await context.get_data(), before)
         self.assertEqual(await self.context().get_data(), before)
 
@@ -600,10 +597,20 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
         before = await self.context().get_data()
         self.edit_error = TelegramBadRequest(method=EditMessageText(chat_id=42, message_id=self.menu_message_id, text='Test'),
                                              message='Bad Request: message cannot be edited')
-        methods = await self.message('8', reply_to=before['payment_prompt_id'])
+        methods = await self.message('8')
         self.assertIn('не сохранено', self.text(methods))
-        self.assertEqual(await self.context().get_data(), before)
+        after = await self.context().get_data()
+        self.assertGreater(after['payment_last_message_id'], before['payment_last_message_id'])
+        self.assertGreater(after['payment_last_update_id'], before['payment_last_update_id'])
+        for key in before.keys() - {'payment_last_message_id', 'payment_last_update_id'}:
+            self.assertEqual(after[key], before[key])
+        self.assertEqual(await self.context().get_state(), ExpenseAllocation.payment_amount.state)
         self.assertTrue((await self.plan()).settlement_confirmed)
+        self.edit_error = None
+        self.assertEqual(await self.message('8', message_id=after['payment_last_message_id']), [])
+        self.assertEqual(await self.context().get_data(), after)
+        self.assert_single_edit(await self.message('8'), self.menu_message_id)
+        self.assertEqual((await self.plan()).payments['p0'], '8.00')
 
     async def test_name_input_returns_to_same_anchor(self):
         await self.manual(count=1)
@@ -613,15 +620,86 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assert_single_edit(await self.message('Участник'), anchor)
         self.assertEqual((await self.plan()).participants[0].name, 'Участник')
 
-    async def test_payment_force_reply_is_separate_but_screen_id_is_stable(self):
+    async def test_payment_plain_text_edits_same_screen_without_force_reply(self):
         await self.payment_ready()
         anchor = self.menu_message_id
         methods = await self.click('paid')
-        prompts = [method for method in methods if isinstance(method, SendMessage)]
-        self.assertEqual(len(prompts), 1)
-        self.assertIsInstance(prompts[0].reply_markup, ForceReply)
-        self.assertEqual(self.menu_message_id, anchor)
-        prompt_id = (await self.context().get_data())['payment_prompt_id']
-        self.assertNotEqual(prompt_id, anchor)
-        self.assert_single_edit(await self.message('9', reply_to=prompt_id), anchor)
+        self.assert_single_edit(methods, anchor)
+        self.assertFalse(any(isinstance(getattr(method, 'reply_markup', None), ForceReply) for method in methods))
+        self.assertIn('обычным текстовым', self.text(methods))
+        self.assertIsNotNone((await self.context().get_data())['payment_input'])
+        self.assert_single_edit(await self.message('9'), anchor)
         self.assertEqual((await self.plan()).payments['p0'], '9.00')
+        self.assertEqual(await self.context().get_state(), ExpenseAllocation.payments.state)
+        self.assertIsNone((await self.context().get_data())['payment_input'])
+
+    async def test_plain_amount_outside_input_and_queued_old_update_are_ignored(self):
+        await self.payment_ready()
+        before = await self.context().get_data()
+        await self.message('9')
+        self.assertEqual(await self.context().get_data(), before)
+        await self.click('paid')
+        before = await self.context().get_data()
+        started = before['payment_input']['started_update_id']
+        self.assertEqual(await self.message('9', update_id=started-1), [])
+        self.assertEqual(await self.context().get_data(), before)
+        self.assert_single_edit(await self.message('9'), self.menu_message_id)
+        self.assertEqual((await self.plan()).payments, {'p0': '9.00'})
+
+    async def test_payment_text_requires_current_receipt_revision_and_payer(self):
+        await self.payment_ready()
+        await self.click('paid')
+        before = await self.context().get_data()
+        for changes in ({'allocation_token': 'other-receipt'}, {'allocation_revision': -1},
+                        {'payment_person': 'p1'}, {'payment_input': None}):
+            with self.subTest(changes=changes):
+                await self.context().set_data({**before, **changes})
+                invalid = await self.context().get_data()
+                self.assertEqual(await self.message('9'), [])
+                self.assertEqual(await self.context().get_data(), invalid)
+        await self.context().set_data(before)
+        await self.message('9')
+        self.assertEqual((await self.plan()).payments, {'p0': '9.00'})
+
+    async def test_open_and_cancel_payment_edit_failures_restore_session(self):
+        await self.payment_ready()
+        before = await self.context().get_data()
+        old_state = await self.context().get_state()
+        paid = self.code('paid')
+        self.edit_error = TelegramBadRequest(
+            method=EditMessageText(chat_id=42, message_id=self.menu_message_id, text='Test'),
+            message='Bad Request: message cannot be edited')
+        await self.callback(paid)
+        self.assertEqual(await self.context().get_data(), before)
+        self.assertEqual(await self.context().get_state(), old_state)
+        self.edit_error = None
+        await self.callback(paid)
+        before = await self.context().get_data()
+        cancel = self.code('payments')
+        self.edit_error = TelegramBadRequest(
+            method=EditMessageText(chat_id=42, message_id=self.menu_message_id, text='Test'),
+            message='Bad Request: message cannot be edited')
+        await self.callback(cancel)
+        self.assertEqual(await self.context().get_data(), before)
+        self.assertEqual(await self.context().get_state(), ExpenseAllocation.payment_amount.state)
+        self.edit_error = None
+        self.assert_single_edit(await self.callback(cancel), self.menu_message_id)
+        cancelled = await self.context().get_data()
+        await self.message('9')
+        self.assertEqual(await self.context().get_data(), cancelled)
+
+    async def test_invalid_amount_edit_failure_keeps_input_retryable(self):
+        await self.payment_ready()
+        await self.click('paid')
+        before = await self.context().get_data()
+        self.edit_error = TelegramBadRequest(
+            method=EditMessageText(chat_id=42, message_id=self.menu_message_id, text='Test'),
+            message='Bad Request: message cannot be edited')
+        await self.message('0.001')
+        after = await self.context().get_data()
+        self.assertEqual(after['payment_input'], before['payment_input'])
+        self.assertEqual(after['allocation'], before['allocation'])
+        self.assertEqual(await self.context().get_state(), ExpenseAllocation.payment_amount.state)
+        self.edit_error = None
+        self.assert_single_edit(await self.message('9'), self.menu_message_id)
+        self.assertEqual((await self.plan()).payments, {'p0': '9.00'})
