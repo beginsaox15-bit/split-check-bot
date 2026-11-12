@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from bot.receipt import parse_price, parse_quantity, receipt_lines
 from bot.receipt_states import ManualReceipt, ReceiptInput, ReceiptEditor
 from bot.receipt_view import RECOGNITION_MENU, answer_in_parts, show_recognition
-from bot import receipt_editor
+from bot import receipt_editor, allocation_handlers
 from bot.services.receipt_models import (
     LowQualityReceipt, RecognizedReceipt, ReceiptItem, TesseractLanguagesUnavailable,
     TesseractNotInstalled, UnparsedReceipt, UnreadableReceipt,
@@ -62,13 +62,14 @@ RECEIPT_MENU = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 
-async def show_receipt(message: Message, items: list[dict], *, finished: bool = False) -> None:
+async def show_receipt(message: Message, items: list[dict], *, finished: bool = False,
+                       finished_menu: InlineKeyboardMarkup | None = None) -> None:
     lines, total = receipt_lines(items)
     heading = "Итоговый чек:" if finished else f"Добавлено ✅\n\n{lines[-1]}\n\nТекущий чек:"
     text = heading + "\n\n" + "\n".join(
         f"{index}. {line}" for index, line in enumerate(lines, 1)
     ) + f"\n\nИтого: {total} ₽"
-    await answer_in_parts(message, text, START_MENU if finished else RECEIPT_MENU)
+    await answer_in_parts(message, text, (finished_menu or START_MENU) if finished else RECEIPT_MENU)
 
 
 async def recognize_last_photo(message: Message, state: FSMContext) -> None:
@@ -221,6 +222,9 @@ async def receipt_photo(message: Message, state: FSMContext) -> None:
                          ReceiptEditor.quantity.state, ReceiptEditor.price.state, ReceiptEditor.delete.state}:
         await message.answer("Сейчас открыт редактор чека. Закончите исправления или отмените чек.")
         return
+    if current_state in allocation_handlers.ALLOCATION_STATES:
+        await message.answer("Сейчас открыто распределение расходов. Используйте его кнопки или /start для нового чека.")
+        return
     await message.answer(
         "Чтобы добавить фото чека, нажмите «🧾 Разделить чек» и отправьте фотографию ещё раз.",
         reply_markup=START_MENU,
@@ -253,7 +257,9 @@ async def confirm_recognition(callback: CallbackQuery, state: FSMContext) -> Non
             "derived_gross_total": result.derived_gross_total,
         })
         await state.set_state(ReceiptInput.confirmed)
-        await callback.message.answer("Чек подтверждён ✅", reply_markup=START_MENU)
+        menu = await allocation_handlers.prepare(state, user_id=callback.from_user.id,
+                                                 chat_id=callback.message.chat.id)
+        await callback.message.answer("Чек подтверждён ✅", reply_markup=menu)
 
 
 @router.callback_query(F.data == "edit_recognition")
@@ -379,8 +385,19 @@ async def finish_receipt(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     if isinstance(callback.message, Message):
         data = await state.get_data()
-        await show_receipt(callback.message, data["items"], finished=True)
-        await state.clear()
+        try:
+            # Retain the exact manual lines for allocation instead of clearing them.
+            _, total = receipt_lines(data['items'])
+            await state.update_data(currency='RUB', receipt_total=total)
+            menu = await allocation_handlers.prepare(state, user_id=callback.from_user.id,
+                                                     chat_id=callback.message.chat.id)
+        except (ValueError, ArithmeticError):
+            await callback.message.answer('Не удалось перейти к делёжке: нужны от 1 до 200 позиций '
+                                          'с суммами в целых копейках, не более 999999999999.99 за позицию. '
+                                          'Чек сохранён; проверьте ввод или начните заново через /start.')
+            return
+        await state.set_state(ReceiptInput.confirmed)
+        await show_receipt(callback.message, data["items"], finished=True, finished_menu=menu)
 
 
 @router.callback_query(F.data == "cancel_receipt")
@@ -392,3 +409,4 @@ async def cancel_receipt(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 router.include_router(receipt_editor.router)
+router.include_router(allocation_handlers.router)
