@@ -1,0 +1,15 @@
+{
+  "items": [
+    {
+      "name": "Синтетический кофе",
+      "quantity": "2",
+      "total_price": "240.00"
+    },
+    {
+      "name": "Синтетический чай",
+      "quantity": "1",
+      "total_price": "100.00"
+    }
+  ],
+  "gross_total": "340.00"
+}
