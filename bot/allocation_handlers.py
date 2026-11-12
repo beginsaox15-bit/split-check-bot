@@ -486,7 +486,8 @@ async def _tip_amount(message: Message, state: FSMContext, event_update: Update)
     if value is None:
         await show_tip_input(message, state, plan, event_update.update_id, error=True)
     elif Decimal(value) == 0:
-        await save(state, set_tips(plan, value, None))
+        plan = set_tips(plan, value, None)
+        await save(state, plan)
         await show_payments(message, state, plan, data.get('payment_page', 0))
     else:
         await show_tip_payers(message, state, plan, value)

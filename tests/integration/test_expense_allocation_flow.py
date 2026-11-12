@@ -17,7 +17,7 @@ from bot.handlers import router
 from bot.expense_split import Allocation, participant_totals
 from bot.receipt_states import ExpenseAllocation, ManualReceipt, ReceiptInput
 from bot.services.receipt_models import RecognizedReceipt
-from bot.settlements import balances
+from bot.settlements import balances, transfers
 
 
 class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -943,6 +943,47 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.message('0')
         self.assertEqual((await self.plan()).tip_amount,'0.00')
         self.assertIsNone((await self.plan()).tip_payer_id)
+
+    async def test_zero_tips_refreshes_confirmed_balances_and_transfers_in_same_message(self):
+        await self.payment_ready()
+        await self.enter_payment(0, '9')
+        await self.enter_tips('3', 2)
+        methods = await self.click('pay_confirm')
+        self.assertTrue((await self.plan()).settlement_confirmed)
+        self.assertIn('Чаевые: 3.00 ₽', self.text(methods))
+        self.assertIn('Чаевые оплатил(а): Участник 3', self.text(methods))
+        self.assertEqual(balances(await self.plan()),
+                         {'p0': Decimal('5'), 'p1': Decimal('-4'), 'p2': Decimal('-1')})
+        anchor = self.menu_message_id
+        self.assert_single_edit(await self.click('tips'), anchor)
+        methods = await self.message('0')
+        edit = self.assert_single_edit(methods, anchor)
+        plan = await self.plan()
+        self.assertEqual(plan.tip_amount, '0.00')
+        self.assertIsNone(plan.tip_payer_id)
+        self.assertFalse(plan.settlement_confirmed)
+        self.assertEqual(plan.payments, {'p0': '9.00'})
+        self.assertEqual(balances(plan),
+                         {'p0': Decimal('6'), 'p1': Decimal('-3'), 'p2': Decimal('-3')})
+        self.assertEqual([(t.sender_id, t.recipient_id, t.amount) for t in transfers(plan)],
+                         [('p1', 'p0', '3.00'), ('p2', 'p0', '3.00')])
+        self.assertIn('Чаевые: 0.00 ₽', edit.text)
+        self.assertNotIn('Чаевые оплатил(а):', edit.text)
+        self.assertIn('Общие расходы: 9.00 ₽', edit.text)
+        self.assertIn('Баланс: 6.00 ₽', edit.text)
+        self.assertEqual(edit.text.count('Баланс: -3.00 ₽'), 2)
+        self.assertIn('Предварительные переводы:', edit.text)
+        self.assertNotIn('Расчёт переводов подтверждён ✅', edit.text)
+        self.assertIn('Участник 2 → Участник 1: 3.00 ₽', edit.text)
+        self.assertIn('Участник 3 → Участник 1: 3.00 ₽', edit.text)
+        self.assertEqual(await self.context().get_state(), ExpenseAllocation.payments.state)
+        self.assertIsNone((await self.context().get_data())['payment_input'])
+        self.assertEqual((await self.context().get_data())['allocation_screen_text'], edit.text)
+        actions = {button.callback_data.split(':')[3]
+                   for row in edit.reply_markup.inline_keyboard for button in row}
+        self.assertIn('pay_confirm', actions)
+        self.assertIn('tips', actions)
+        self.assertNotIn('tip_payer_edit', actions)
 
     async def test_tip_payer_pages_and_reallocation_keep_saved_tips(self):
         await self.payment_ready(people=11)
