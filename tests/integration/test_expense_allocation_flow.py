@@ -1240,6 +1240,7 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_discount_does_not_suppress_ambiguous_ocr_totals_or_quarantined_prepayment(self):
         for facts in ({'gross':'4000'},{'gross':'3680','receipt_total':'4600'},
+                      {'gross':'4600','receipt_total':'4000'},
                       {'gross':'3680','prepayment':'1000','amount_due':'2500'},
                       {'gross':'3680','amount_due':'2680'}):
             with self.subTest(facts=facts):
@@ -1251,6 +1252,33 @@ class ExpenseAllocationFlowTests(unittest.IsolatedAsyncioTestCase):
                 await self.click('pay_confirm')
                 self.assertFalse((await self.plan()).settlement_confirmed)
                 self.assertTrue((await self.plan()).mismatch)
+
+    async def test_before_and_after_totals_with_user_discount_can_be_confirmed(self):
+        await self.discount_ready(gross='4600',receipt_total='3680')
+        original=(await self.plan()).model_dump()
+        anchor=self.menu_message_id
+        await self.enter_payment(1,'3680')
+        await self.click('pay_confirm')
+        self.assertFalse((await self.plan()).settlement_confirmed)
+        self.assertEqual((await self.plan()).discount_amount,'0.00')
+        methods=await self.enter_discount('920')
+        text=self.text(methods)
+        self.assertIn('Ресторан после скидки: 3680.00 ₽',text)
+        self.assertIn('Ресторанные оплаты: 3680.00 ₽',text)
+        self.assertIn('Считано с чека (gross_total): 4600.00 ₽',text)
+        self.assertIn('Считано с чека (receipt_total): 3680.00 ₽',text)
+        self.assertIn('Никита → Андрей: 800.00 ₽',text)
+        self.assertIn('Артём → Андрей: 1280.00 ₽',text)
+        self.assertNotIn('Итоги OCR противоречат',text)
+        self.assertEqual((await self.plan()).receipt_total_issues,[])
+        self.assert_single_edit(await self.click('pay_confirm'),anchor)
+        plan=await self.plan()
+        self.assertTrue(plan.settlement_confirmed)
+        self.assertEqual(plan.payments,{'p1':'3680.00'})
+        self.assertEqual(plan.discount_amount,'920.00')
+        for field in ('items','gross_total','receipt_total','prepayment','amount_due','currency'):
+            self.assertEqual(plan.model_dump()[field],original[field])
+        self.assertEqual(sum(balances(plan).values()),0)
 
     async def test_discount_prepayment_is_counted_once_and_not_added_to_expenses(self):
         await self.discount_ready(prepayment='1000',amount_due='2680')

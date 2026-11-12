@@ -112,10 +112,12 @@ class Allocation(BaseModel):
             if value is not None and Decimal(value) not in {before, after}:
                 issues.append('unexplained_total')
                 break
-        # These two OCR fields normally duplicate the same printed total; if
-        # they differ, their meanings cannot safely be inferred from arithmetic.
+        # A user-entered discount may explain distinct totals in this explicit
+        # direction: gross is before discount, receipt total is after discount.
+        # Other unequal pairs remain ambiguous; never infer a missing discount.
         if (self.gross_total is not None and self.receipt_total is not None
-                and Decimal(self.gross_total) != Decimal(self.receipt_total)):
+                and Decimal(self.gross_total) != Decimal(self.receipt_total)
+                and not (Decimal(self.gross_total) == before and Decimal(self.receipt_total) == after)):
             issues.append('conflicting_totals')
         if self.prepayment_suspect:
             issues.append('suspect_prepayment')

@@ -144,7 +144,8 @@ class DiscountTests(unittest.TestCase):
         self.assertTrue(removed.mismatch)
 
     def test_ambiguous_or_conflicting_ocr_totals_block_confirmation(self):
-        cases=[{'gross':'4000'}, {'gross':'4600','receipt_total':'3680'},
+        cases=[{'gross':'4000'}, {'gross':'4600','receipt_total':'4000'},
+               {'gross':'4000','receipt_total':'3680'}, {'gross':'3680','receipt_total':'4600'},
                {'gross':'3680','receipt_total':'4000'}, {'prepayment':'1000','amount_due':'3000'},
                {'amount_due':'2680'}, {'prepayment':'4000'}, {'prepayment_suspect':True}]
         for facts in cases:
@@ -164,6 +165,40 @@ class DiscountTests(unittest.TestCase):
             plan=set_payment(set_discount(self.plan(**facts),'920'),'p1','3680')
             self.assertFalse(plan.mismatch)
             self.assert_reconciles(plan)
+
+    def test_before_and_after_totals_with_user_discount_can_be_confirmed(self):
+        original=self.plan(gross='4600',receipt_total='3680')
+        paid=set_payment(original,'p1','3680')
+        self.assertEqual(paid.discount_amount,'0.00')
+        self.assertEqual(paid.restaurant_total,Decimal('4600'))
+        with self.assertRaises(ValueError):confirm_settlement(paid)
+        discounted=set_discount(paid,'920')
+        self.assertEqual(discounted.receipt_total_issues,[])
+        self.assertEqual(discounted.paid_total,Decimal('3680'))
+        self.assertEqual(discounted.restaurant_total,Decimal('3680'))
+        self.assertEqual(settlement_issues(discounted),[])
+        self.assertEqual([(m.sender_id,m.recipient_id,m.amount) for m in transfers(discounted)],
+                         [('p0','p1','800.00'),('p2','p1','1280.00')])
+        self.assertTrue(confirm_settlement(discounted).settlement_confirmed)
+        for field in ('items','gross_total','receipt_total','prepayment','amount_due','currency'):
+            self.assertEqual(discounted.model_dump()[field],original.model_dump()[field])
+        self.assert_reconciles(discounted)
+
+    def test_agreed_pair_does_not_bypass_wrong_discount_payments_or_suspect_prepayment(self):
+        original=self.plan(gross='4600',receipt_total='3680')
+        wrong=set_payment(set_discount(original,'919'),'p1','3681')
+        self.assertIn('receipt_mismatch',settlement_issues(wrong))
+        with self.assertRaises(ValueError):confirm_settlement(wrong)
+        correct=set_discount(original,'920')
+        for amount in ('3679.99','3680.01'):
+            with self.subTest(amount=amount):
+                wrong=set_payment(correct,'p1',amount)
+                self.assertIn('payments_mismatch',settlement_issues(wrong))
+                with self.assertRaises(ValueError):confirm_settlement(wrong)
+        suspect=Allocation.model_validate({**correct.model_dump(),'prepayment_suspect':True,
+                                            'payments':{'p1':'3680.00'}})
+        self.assertIn('suspect_prepayment',suspect.receipt_total_issues)
+        with self.assertRaises(ValueError):confirm_settlement(suspect)
 
     def test_legacy_zero_discount_loading_keeps_previous_reconciliation(self):
         original=set_payment(self.plan(),'p0','4600')
