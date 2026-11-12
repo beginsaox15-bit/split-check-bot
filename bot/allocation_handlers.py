@@ -5,12 +5,13 @@ from decimal import Decimal
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 
 from bot.expense_split import Allocation, add_participant, assign_item, complete, participant_totals, snapshot
 from bot.receipt_states import ExpenseAllocation, ReceiptInput
 from bot.allocation_screen import ScreenEditError, render
 from bot.settlements import balances, confirm_settlement, set_payment, settlement_issues, transfers
+from bot.payment_input import accepts_message, new_session
 
 router = Router(name='expense_allocation')
 PAGE_SIZE = 10
@@ -190,7 +191,7 @@ def payments_text(plan):
 async def show_payments(message, state, plan, page=0):
     page = max(0, min(page, (len(plan.participants)-1)//PAGE_SIZE))
     await state.set_state(ExpenseAllocation.payments)
-    await state.update_data(payment_page=page, payment_person=None, payment_prompt_id=None)
+    await state.update_data(payment_page=page, payment_person=None, payment_input=None)
     button = await buttons(state)
     rows = [[button('✏️ ' + person.name[:30] + ' — ' + plan.payments.get(person.id, '0.00'), 'paid', index)]
             for index, person in enumerate(plan.participants) if page*PAGE_SIZE <= index < (page+1)*PAGE_SIZE]
@@ -207,22 +208,24 @@ async def show_payments(message, state, plan, page=0):
     await render(message, state, payments_text(plan), InlineKeyboardMarkup(inline_keyboard=rows))
 
 
-async def show_payment_input(message, state, plan, index):
+async def show_payment_input(message, state, plan, index, update_id, *, error=False):
     person = plan.participants[index]
     await state.set_state(ExpenseAllocation.payment_amount)
-    await state.update_data(payment_person=person.id, payment_prompt_id=None)
+    await state.update_data(payment_person=person.id, payment_input=None)
     button = await buttons(state)
-    await render(message, state, f'Введите оплату участника: {person.name}. Ответьте на отдельный вопрос бота.',
-                 InlineKeyboardMarkup(inline_keyboard=[[button('↩️ Назад без сохранения', 'payments', index//PAGE_SIZE)]]))
-    prompt = await message.answer(
-        f'{person.name}: сколько всего оплачено в ресторан? Сейчас: {amount(plan.payments.get(person.id, "0"), plan)}. '
-        'Ответьте на это сообщение суммой с точностью до копейки, например 1500,50; 0 снимает оплату. '
-        'Включите внесённую этим участником предоплату. Новое значение заменит прежнее и сбросит подтверждение расчёта.',
-        reply_markup=ForceReply(selective=True, input_field_placeholder='Например: 1500,50'))
-    await state.update_data(payment_prompt_id=prompt.message_id)
+    text = ('Нужна неотрицательная сумма с максимум двумя знаками после запятой, без округления.\n\n'
+            if error else '')
+    text += (f'{person.name}: сколько всего оплачено в ресторан? Сейчас: {amount(plan.payments.get(person.id, "0"), plan)}. '
+             'Отправьте сумму обычным текстовым сообщением, например 1500,50; 0 снимает оплату. '
+             'Не используйте «Ответить». Включите внесённую этим участником предоплату. '
+             'Новое значение заменит прежнее и сбросит подтверждение расчёта.')
+    await render(message, state, text, InlineKeyboardMarkup(
+        inline_keyboard=[[button('↩️ Назад без сохранения', 'payments', index//PAGE_SIZE)]]))
+    data = await state.get_data()
+    await state.update_data(payment_input=new_session(data, person.id, update_id, message.message_id))
 
 
-async def _allocation_callback(callback: CallbackQuery, state: FSMContext):
+async def _allocation_callback(callback: CallbackQuery, state: FSMContext, event_update: Update | None = None):
     parts = (callback.data or '').split(':')
     data = await state.get_data()
     current = await state.get_state()
@@ -272,6 +275,9 @@ async def _allocation_callback(callback: CallbackQuery, state: FSMContext):
         return
     if action in {'payments', 'paid', 'pay_confirm'} and not plan.completed:
         await callback.answer('Сначала завершите распределение позиций.')
+        return
+    if action == 'paid' and event_update is None:
+        await callback.answer('Откройте ввод оплаты заново.')
         return
     if action == 'pay_confirm' and settlement_issues(plan):
         await callback.answer('Расчёт не подтверждён: проверьте суммы оплат, позиций и общий итог чека.', show_alert=True)
@@ -342,7 +348,7 @@ async def _allocation_callback(callback: CallbackQuery, state: FSMContext):
     elif action == 'payments':
         await show_payments(message, state, plan, index)
     elif action == 'paid':
-        await show_payment_input(message, state, plan, index)
+        await show_payment_input(message, state, plan, index, event_update.update_id)
     elif action == 'pay_confirm':
         plan = confirm_settlement(plan)
         await save(state, plan)
@@ -374,15 +380,11 @@ async def _participant_name(message: Message, state: FSMContext):
     await show_overview(message, state, plan)
 
 
-async def _payment_amount(message: Message, state: FSMContext):
+async def _payment_amount(message: Message, state: FSMContext, event_update: Update):
     data = await state.get_data()
     plan = Allocation.model_validate(data['allocation'])
     if (message.from_user is None or message.from_user.id != plan.owner_user_id
             or message.chat.id != plan.owner_chat_id):
-        return
-    if (message.reply_to_message is None
-            or message.reply_to_message.message_id != data.get('payment_prompt_id')):
-        await message.answer('Ответьте суммой на последнее сообщение с вопросом об оплате.')
         return
     person_id = data.get('payment_person')
     if not plan.completed or person_id not in {person.id for person in plan.participants}:
@@ -392,19 +394,18 @@ async def _payment_amount(message: Message, state: FSMContext):
     try:
         plan = set_payment(plan, person_id, message.text or '')
     except ValueError:
-        await message.answer('Нужна неотрицательная сумма с максимум двумя знаками после запятой, без округления.')
-        await show_payment_input(message, state, plan, index)
+        await show_payment_input(message, state, plan, index, event_update.update_id, error=True)
         return
     await save(state, plan)
     await show_payments(message, state, plan, index//PAGE_SIZE)
 
 
 @router.callback_query(F.data.startswith('sp:'))
-async def allocation_callback(callback: CallbackQuery, state: FSMContext):
+async def allocation_callback(callback: CallbackQuery, state: FSMContext, event_update: Update | None = None):
     before = deepcopy(await state.get_data())
     previous_state = await state.get_state()
     try:
-        changed = await _allocation_callback(callback, state)
+        changed = await _allocation_callback(callback, state, event_update)
     except ScreenEditError:
         # Keep the old menu/revision and allocation together if Telegram rejects
         # the edit. The same callback may safely be retried; nothing was saved twice.
@@ -417,11 +418,11 @@ async def allocation_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
 
 
-async def text_transaction(message, state, handler):
+async def text_transaction(message, state, handler, **kwargs):
     before = deepcopy(await state.get_data())
     previous_state = await state.get_state()
     try:
-        await handler(message, state)
+        await handler(message, state, **kwargs)
     except ScreenEditError:
         await state.set_data(before)
         await state.set_state(previous_state)
@@ -435,8 +436,22 @@ async def participant_name(message: Message, state: FSMContext):
 
 
 @router.message(ExpenseAllocation.payment_amount)
-async def payment_amount(message: Message, state: FSMContext):
-    await text_transaction(message, state, _payment_amount)
+async def payment_amount(message: Message, state: FSMContext, event_update: Update | None = None):
+    data = await state.get_data()
+    try:
+        plan = Allocation.model_validate(data.get('allocation'))
+    except (ValueError, TypeError):
+        return
+    if message.from_user is None or event_update is None or not accepts_message(
+            data, plan, await state.get_state(), user_id=message.from_user.id, chat_id=message.chat.id,
+            message_id=message.message_id, update_id=event_update.update_id,
+            is_reply=message.reply_to_message is not None):
+        return
+    # Consume IDs before the UI transaction. A duplicate delivery must not apply
+    # an amount later, even if Telegram rejects an edit and the business state rolls back.
+    await state.update_data(payment_last_message_id=message.message_id,
+                            payment_last_update_id=event_update.update_id)
+    await text_transaction(message, state, _payment_amount, event_update=event_update)
 
 
 async def recover_screen(message: Message, state: FSMContext):
@@ -450,5 +465,5 @@ async def recover_screen(message: Message, state: FSMContext):
             or message.chat.id != plan.owner_chat_id):
         return
     await state.update_data(allocation_screen_id=None, allocation_screen_chat_id=None,
-                            allocation_item=None, allocation_selection=[], payment_person=None, payment_prompt_id=None)
+                            allocation_item=None, allocation_selection=[], payment_person=None, payment_input=None)
     await show_overview(message, state, plan)
