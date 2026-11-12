@@ -2,7 +2,7 @@ import logging
 from io import BytesIO
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -132,6 +132,11 @@ async def recognize_last_photo(message: Message, state: FSMContext) -> None:
 async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(START_TEXT, reply_markup=START_MENU)
+
+
+@router.message(Command('allocation'))
+async def recover_allocation(message: Message, state: FSMContext) -> None:
+    await allocation_handlers.recover_screen(message, state)
 
 
 @router.callback_query(F.data == "split_check")

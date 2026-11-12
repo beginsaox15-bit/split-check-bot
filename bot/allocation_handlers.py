@@ -1,5 +1,6 @@
 """Named participants and versioned allocation menus in the existing user FSM."""
 import secrets
+from copy import deepcopy
 from decimal import Decimal
 
 from aiogram import F, Router
@@ -8,7 +9,7 @@ from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, Inlin
 
 from bot.expense_split import Allocation, add_participant, assign_item, complete, participant_totals, snapshot
 from bot.receipt_states import ExpenseAllocation, ReceiptInput
-from bot.receipt_view import answer_in_parts
+from bot.allocation_screen import ScreenEditError, render
 from bot.settlements import balances, confirm_settlement, set_payment, settlement_issues, transfers
 
 router = Router(name='expense_allocation')
@@ -47,7 +48,8 @@ async def prepare(state, *, user_id, chat_id):
     plan = snapshot(await state.get_data(), user_id=user_id, chat_id=chat_id)
     await save(state, plan)
     await state.update_data(allocation_token=secrets.token_hex(4), allocation_revision=0,
-                            allocation_seen_messages=[], allocation_selection=[], allocation_item=None)
+                            allocation_seen_messages=[], allocation_selection=[], allocation_item=None,
+                            allocation_screen_id=None, allocation_screen_chat_id=None)
     return await entry_menu(state)
 
 
@@ -92,7 +94,7 @@ async def show_overview(message, state, plan):
                 [button('🔄 Предварительный итог', 'overview')],
                 [button('✅ Завершить распределение', 'finish')],
                 [button('↩️ К чеку', 'back')]]
-    await answer_in_parts(message, overview_text(plan), InlineKeyboardMarkup(inline_keyboard=rows))
+    await render(message, state, overview_text(plan), InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 async def show_items(message, state, plan, page=0):
@@ -118,7 +120,7 @@ async def show_items(message, state, plan, page=0):
     if navigation:
         rows.append(navigation)
     rows.append([button('↩️ Предварительный итог', 'overview')])
-    await answer_in_parts(message, text, InlineKeyboardMarkup(inline_keyboard=rows))
+    await render(message, state, text, InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 async def show_selection(message, state, plan, index, selected):
@@ -126,13 +128,24 @@ async def show_selection(message, state, plan, index, selected):
     await state.update_data(allocation_item=index, allocation_selection=selected)
     button = await buttons(state)
     item = plan.items[index]
-    text = f'#{index+1}. {item.name} — {amount(item.amount, plan)}\nВыберите одного или нескольких участников.'
+    text = f'#{index+1} из {len(plan.items)}. {item.name} × {item.quantity} — {amount(item.amount, plan)}\nВыберите одного или нескольких участников.'
+    if item.guest_id is not None:
+        text += f'\nГость в исходном чеке: {item.guest_id}'
+    chosen = ', '.join(p.name for p in plan.participants if p.id in selected) or 'никого'
+    text += f'\nВыбрано: {chosen}\nПереход к соседнему блюду сохраняет выбор. «Назад без сохранения» отменяет изменения.'
     rows = [[button(('☑️ ' if p.id in selected else '⬜️ ') + p.name, 'toggle', i)]
             for i, p in enumerate(plan.participants)]
+    navigation = []
+    if index:
+        navigation.append(button('⬅️ Предыдущее блюдо', 'dish', index-1))
+    if index+1 < len(plan.items):
+        navigation.append(button('Следующее блюдо ➡️', 'dish', index+1))
+    if navigation:
+        rows.append(navigation)
     rows += [[button('✅ Сохранить назначение', 'apply')],
              [button('🧹 Снять назначение', 'clear')],
              [button('↩️ Назад без сохранения', 'items', index//PAGE_SIZE)]]
-    await answer_in_parts(message, text, InlineKeyboardMarkup(inline_keyboard=rows))
+    await render(message, state, text, InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 def payments_text(plan):
@@ -191,7 +204,7 @@ async def show_payments(message, state, plan, page=0):
     if not plan.settlement_confirmed:
         rows.append([button('✅ Подтвердить расчёт переводов', 'pay_confirm')])
     rows.append([button('↩️ К распределению', 'split_back')])
-    await answer_in_parts(message, payments_text(plan), InlineKeyboardMarkup(inline_keyboard=rows))
+    await render(message, state, payments_text(plan), InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 async def show_payment_input(message, state, plan, index):
@@ -199,18 +212,17 @@ async def show_payment_input(message, state, plan, index):
     await state.set_state(ExpenseAllocation.payment_amount)
     await state.update_data(payment_person=person.id, payment_prompt_id=None)
     button = await buttons(state)
+    await render(message, state, f'Введите оплату участника: {person.name}. Ответьте на отдельный вопрос бота.',
+                 InlineKeyboardMarkup(inline_keyboard=[[button('↩️ Назад без сохранения', 'payments', index//PAGE_SIZE)]]))
     prompt = await message.answer(
         f'{person.name}: сколько всего оплачено в ресторан? Сейчас: {amount(plan.payments.get(person.id, "0"), plan)}. '
         'Ответьте на это сообщение суммой с точностью до копейки, например 1500,50; 0 снимает оплату. '
         'Включите внесённую этим участником предоплату. Новое значение заменит прежнее и сбросит подтверждение расчёта.',
         reply_markup=ForceReply(selective=True, input_field_placeholder='Например: 1500,50'))
     await state.update_data(payment_prompt_id=prompt.message_id)
-    await message.answer('Можно вернуться без изменения оплаты.', reply_markup=InlineKeyboardMarkup(
-        inline_keyboard=[[button('↩️ Назад без сохранения', 'payments', index//PAGE_SIZE)]]))
 
 
-@router.callback_query(F.data.startswith('sp:'))
-async def allocation_callback(callback: CallbackQuery, state: FSMContext):
+async def _allocation_callback(callback: CallbackQuery, state: FSMContext):
     parts = (callback.data or '').split(':')
     data = await state.get_data()
     current = await state.get_state()
@@ -237,6 +249,8 @@ async def allocation_callback(callback: CallbackQuery, state: FSMContext):
         'items': {ExpenseAllocation.overview.state, ExpenseAllocation.items.state, ExpenseAllocation.item.state},
         'select': {ExpenseAllocation.items.state},
         'toggle': {ExpenseAllocation.item.state}, 'apply': {ExpenseAllocation.item.state},
+        'dish': {ExpenseAllocation.item.state},
+        'screen_page': ALLOCATION_STATES | {ReceiptInput.confirmed.state},
         'clear': {ExpenseAllocation.item.state}, 'finish': {ExpenseAllocation.overview.state},
         'reopen': {ExpenseAllocation.done.state},
         'overview': {ExpenseAllocation.overview.state, ExpenseAllocation.name.state,
@@ -248,6 +262,10 @@ async def allocation_callback(callback: CallbackQuery, state: FSMContext):
     }
     if current not in allowed.get(action, set()) or index < 0:
         await callback.answer('Действие сейчас недоступно.')
+        return
+    if action == 'screen_page' and (not isinstance(data.get('allocation_screen_text'), str)
+                                    or not isinstance(data.get('allocation_screen_markup'), dict)):
+        await callback.answer('Откройте экран заново через /allocation.')
         return
     if action == 'finish' and plan.unassigned:
         await callback.answer(f'Остались нераспределённые позиции: {len(plan.unassigned)}.', show_alert=True)
@@ -262,40 +280,54 @@ async def allocation_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer('Сначала добавьте хотя бы одного участника.')
         return
     if (action == 'select' and index >= len(plan.items)
+            or action == 'dish' and index >= len(plan.items)
             or action in {'toggle', 'paid'} and index >= len(plan.participants)):
         await callback.answer('Позиция или участник не найдены.')
         return
-    await callback.answer()
+    if data.get('allocation_screen_id') is not None and (
+            data['allocation_screen_id'] != callback.message.message_id
+            or data.get('allocation_screen_chat_id') != callback.message.chat.id):
+        await callback.answer('Это старый экран. Используйте текущий или /allocation.')
+        return
+    if data.get('allocation_screen_id') is None:
+        await state.update_data(allocation_screen_id=callback.message.message_id,
+                                allocation_screen_chat_id=callback.message.chat.id)
     message = callback.message
     if action in {'begin', 'overview'}:
         await show_overview(message, state, plan)
     elif action == 'add':
         if len(plan.participants) >= 30:
-            await message.answer('В одном чеке можно добавить до 30 участников.')
+            await callback.answer('В одном чеке можно добавить до 30 участников.')
             return
         await state.set_state(ExpenseAllocation.name)
         button = await buttons(state)
-        await message.answer('Введите имя участника (до 60 символов).',
-                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button('↩️ Назад', 'overview')]]))
+        await render(message, state, 'Введите имя участника (до 60 символов).',
+                     InlineKeyboardMarkup(inline_keyboard=[[button('↩️ Назад', 'overview')]]))
     elif action == 'items':
         await show_items(message, state, plan, index)
     elif action == 'select':
         item = plan.items[index]
         await show_selection(message, state, plan, index, list(plan.assignments.get(item.id, [])))
-    elif action in {'toggle', 'apply', 'clear'}:
+    elif action in {'toggle', 'apply', 'clear', 'dish'}:
         item_index = data.get('allocation_item')
         if not isinstance(item_index, int) or not 0 <= item_index < len(plan.items):
             await show_items(message, state, plan)
-            return
+            return True
         selected = list(data.get('allocation_selection', []))
         if action == 'toggle':
             person = plan.participants[index].id
             selected.remove(person) if person in selected else selected.append(person)
             await show_selection(message, state, plan, item_index, selected)
         else:
+            if action == 'dish' and abs(index-item_index) != 1:
+                await callback.answer('Выберите соседнее блюдо.')
+                return
             plan = assign_item(plan, plan.items[item_index].id, [] if action == 'clear' else selected)
             await save(state, plan)
-            await show_items(message, state, plan, item_index//PAGE_SIZE)
+            if action == 'dish':
+                await show_selection(message, state, plan, index, list(plan.assignments.get(plan.items[index].id, [])))
+            else:
+                await show_items(message, state, plan, item_index//PAGE_SIZE)
     elif action == 'finish':
         plan = complete(plan)
         await save(state, plan)
@@ -306,7 +338,7 @@ async def allocation_callback(callback: CallbackQuery, state: FSMContext):
         await show_overview(message, state, plan)
     elif action == 'back':
         await state.set_state(ReceiptInput.confirmed)
-        await message.answer('Чек сохранён. Распределение можно продолжить.', reply_markup=await entry_menu(state))
+        await render(message, state, 'Чек сохранён. Распределение можно продолжить.', await entry_menu(state))
     elif action == 'payments':
         await show_payments(message, state, plan, index)
     elif action == 'paid':
@@ -317,10 +349,14 @@ async def allocation_callback(callback: CallbackQuery, state: FSMContext):
         await show_payments(message, state, plan, data.get('payment_page', 0))
     elif action == 'split_back':
         await show_overview(message, state, plan)
+    elif action == 'screen_page':
+        await buttons(state)
+        await render(message, state, data['allocation_screen_text'],
+                     InlineKeyboardMarkup.model_validate(data['allocation_screen_markup']), index)
+    return True
 
 
-@router.message(ExpenseAllocation.name)
-async def participant_name(message: Message, state: FSMContext):
+async def _participant_name(message: Message, state: FSMContext):
     data = await state.get_data()
     plan = Allocation.model_validate(data['allocation'])
     if (message.from_user is None or message.from_user.id != plan.owner_user_id
@@ -338,8 +374,7 @@ async def participant_name(message: Message, state: FSMContext):
     await show_overview(message, state, plan)
 
 
-@router.message(ExpenseAllocation.payment_amount)
-async def payment_amount(message: Message, state: FSMContext):
+async def _payment_amount(message: Message, state: FSMContext):
     data = await state.get_data()
     plan = Allocation.model_validate(data['allocation'])
     if (message.from_user is None or message.from_user.id != plan.owner_user_id
@@ -362,3 +397,58 @@ async def payment_amount(message: Message, state: FSMContext):
         return
     await save(state, plan)
     await show_payments(message, state, plan, index//PAGE_SIZE)
+
+
+@router.callback_query(F.data.startswith('sp:'))
+async def allocation_callback(callback: CallbackQuery, state: FSMContext):
+    before = deepcopy(await state.get_data())
+    previous_state = await state.get_state()
+    try:
+        changed = await _allocation_callback(callback, state)
+    except ScreenEditError:
+        # Keep the old menu/revision and allocation together if Telegram rejects
+        # the edit. The same callback may safely be retried; nothing was saved twice.
+        await state.set_data(before)
+        await state.set_state(previous_state)
+        await callback.answer('Не удалось обновить экран. Изменение не сохранено. '
+                              'Повторите нажатие или откройте /allocation.', show_alert=True)
+        return
+    if changed:
+        await callback.answer()
+
+
+async def text_transaction(message, state, handler):
+    before = deepcopy(await state.get_data())
+    previous_state = await state.get_state()
+    try:
+        await handler(message, state)
+    except ScreenEditError:
+        await state.set_data(before)
+        await state.set_state(previous_state)
+        await message.answer('Не удалось обновить экран. Изменение не сохранено. '
+                             'Повторите ввод или откройте /allocation.')
+
+
+@router.message(ExpenseAllocation.name)
+async def participant_name(message: Message, state: FSMContext):
+    await text_transaction(message, state, _participant_name)
+
+
+@router.message(ExpenseAllocation.payment_amount)
+async def payment_amount(message: Message, state: FSMContext):
+    await text_transaction(message, state, _payment_amount)
+
+
+async def recover_screen(message: Message, state: FSMContext):
+    data = await state.get_data()
+    try:
+        plan = Allocation.model_validate(data.get('allocation'))
+    except (ValueError, TypeError):
+        await message.answer('Сначала подтвердите чек для распределения.')
+        return
+    if (message.from_user is None or message.from_user.id != plan.owner_user_id
+            or message.chat.id != plan.owner_chat_id):
+        return
+    await state.update_data(allocation_screen_id=None, allocation_screen_chat_id=None,
+                            allocation_item=None, allocation_selection=[], payment_person=None, payment_prompt_id=None)
+    await show_overview(message, state, plan)
